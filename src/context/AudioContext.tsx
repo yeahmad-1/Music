@@ -324,7 +324,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: song.uri },
-        { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+        { shouldPlay: true, progressUpdateIntervalMillis: 250 },
         onPlaybackStatusUpdate
       );
 
@@ -466,6 +466,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const seek = async (position: number) => {
+    setPlaybackStatus((prev: any) => (prev ? { ...prev, positionMillis: position } : prev));
     if (soundRef.current) {
       await soundRef.current.setPositionAsync(position).catch(() => {});
     }

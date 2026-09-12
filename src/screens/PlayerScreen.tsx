@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking, PanResponder } from 'react-native';
+import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking, PanResponder, Platform } from 'react-native';
 import { IconButton, Text, Surface, useTheme } from 'react-native-paper';
 import { useAudio } from '../context/AudioContext';
 import { adService, WheelAdConfig } from '../services/AdService';
@@ -56,6 +56,7 @@ const PlayerScreen = () => {
   const sliderWidthRef = useRef(0);
   const sliderPageXRef = useRef(0);
   const sliderViewRef = useRef<View>(null);
+  const cleanupPointerListenersRef = useRef<(() => void) | null>(null);
 
   const durationMillis = playbackStatus?.durationMillis || 0;
   const currentPositionMillis = isScrubbing && scrubPositionMillis !== null
@@ -66,15 +67,106 @@ const PlayerScreen = () => {
     ? Math.min(Math.max(currentPositionMillis / durationMillis, 0), 1)
     : 0;
 
-  const handleSeekFromEvent = (evt: any, isFinal: boolean) => {
+  useEffect(() => {
+    return () => {
+      if (cleanupPointerListenersRef.current) {
+        cleanupPointerListenersRef.current();
+      }
+    };
+  }, []);
+
+  const getClientX = (evt: any): number => {
+    if (evt.clientX !== undefined) return evt.clientX;
+    if (evt.touches && evt.touches.length > 0) return evt.touches[0].clientX;
+    if (evt.changedTouches && evt.changedTouches.length > 0) return evt.changedTouches[0].clientX;
+    return 0;
+  };
+
+  const handlePointerDown = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    const target = (e.currentTarget || sliderViewRef.current) as any;
+    if (!target || durationMillis <= 0) return;
+
+    const getTargetRect = () => {
+      if (typeof target.getBoundingClientRect === 'function') {
+        return target.getBoundingClientRect();
+      }
+      return null;
+    };
+
+    const initialRect = getTargetRect();
+    if (!initialRect || initialRect.width <= 0) return;
+
+    const updatePosition = (clientX: number, isFinal: boolean) => {
+      const rect = getTargetRect() || initialRect;
+      const width = rect.width;
+      if (width <= 0) return;
+      const clampedX = Math.max(0, Math.min(clientX - rect.left, width));
+      const ratio = clampedX / width;
+      const targetMillis = Math.round(ratio * durationMillis);
+
+      if (isFinal) {
+        setIsScrubbing(false);
+        setScrubPositionMillis(null);
+        seek(targetMillis);
+      } else {
+        setIsScrubbing(true);
+        setScrubPositionMillis(targetMillis);
+      }
+    };
+
+    if (e.preventDefault) {
+      try {
+        e.preventDefault();
+      } catch (_) {}
+    }
+
+    const startX = getClientX(e);
+    updatePosition(startX, false);
+
+    const onPointerMove = (moveEvt: any) => {
+      updatePosition(getClientX(moveEvt), false);
+    };
+
+    const onPointerUp = (upEvt: any) => {
+      if (cleanupPointerListenersRef.current) {
+        cleanupPointerListenersRef.current();
+      }
+      updatePosition(getClientX(upEvt), true);
+    };
+
+    const cleanup = () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        window.removeEventListener('pointercancel', onPointerUp);
+        window.removeEventListener('mousemove', onPointerMove);
+        window.removeEventListener('mouseup', onPointerUp);
+        window.removeEventListener('touchmove', onPointerMove);
+        window.removeEventListener('touchend', onPointerUp);
+      }
+      cleanupPointerListenersRef.current = null;
+    };
+
+    cleanupPointerListenersRef.current = cleanup;
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', onPointerUp);
+      window.addEventListener('pointercancel', onPointerUp);
+      window.addEventListener('mousemove', onPointerMove);
+      window.addEventListener('mouseup', onPointerUp);
+      window.addEventListener('touchmove', onPointerMove, { passive: false });
+      window.addEventListener('touchend', onPointerUp);
+    }
+  };
+
+  const handleNativeSeek = (screenX: number, isFinal: boolean) => {
     const width = sliderWidthRef.current;
     if (width <= 0 || durationMillis <= 0) return;
 
-    let touchX = evt.nativeEvent.locationX;
-    if (evt.nativeEvent.pageX !== undefined && sliderPageXRef.current > 0) {
-      touchX = evt.nativeEvent.pageX - sliderPageXRef.current;
-    }
-
+    const pageX = sliderPageXRef.current;
+    const touchX = screenX - pageX;
     const clampedX = Math.max(0, Math.min(touchX, width));
     const ratio = clampedX / width;
     const targetMillis = Math.round(ratio * durationMillis);
@@ -91,22 +183,23 @@ const PlayerScreen = () => {
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        if (sliderViewRef.current) {
-          sliderViewRef.current.measure((x, y, width, height, pageX) => {
-            if (pageX) sliderPageXRef.current = pageX;
+      onStartShouldSetPanResponder: () => Platform.OS !== 'web',
+      onMoveShouldSetPanResponder: () => Platform.OS !== 'web',
+      onPanResponderGrant: (evt, gestureState) => {
+        if (sliderViewRef.current && (sliderViewRef.current as any).measure) {
+          (sliderViewRef.current as any).measure((x: number, y: number, width: number, height: number, pageX: number) => {
             if (width) sliderWidthRef.current = width;
+            if (pageX !== undefined) sliderPageXRef.current = pageX;
           });
         }
-        handleSeekFromEvent(evt, false);
+        const startX = gestureState.x0 || evt.nativeEvent.pageX;
+        handleNativeSeek(startX, false);
       },
-      onPanResponderMove: (evt) => {
-        handleSeekFromEvent(evt, false);
+      onPanResponderMove: (evt, gestureState) => {
+        handleNativeSeek(gestureState.moveX, false);
       },
-      onPanResponderRelease: (evt) => {
-        handleSeekFromEvent(evt, true);
+      onPanResponderRelease: (evt, gestureState) => {
+        handleNativeSeek(gestureState.moveX || evt.nativeEvent.pageX, true);
       },
       onPanResponderTerminate: () => {
         setIsScrubbing(false);
@@ -199,23 +292,33 @@ const PlayerScreen = () => {
       <View style={styles.progressContainer}>
         <View
           ref={sliderViewRef}
-          style={styles.sliderTouchArea}
+          style={[
+            styles.sliderTouchArea,
+            (Platform.OS === 'web'
+              ? { cursor: 'pointer', touchAction: 'none', userSelect: 'none' }
+              : {}) as any,
+          ]}
           onLayout={(e) => {
             const w = e.nativeEvent.layout.width;
             sliderWidthRef.current = w;
-            if (sliderViewRef.current) {
-              sliderViewRef.current.measure((x, y, width, height, pageX) => {
-                if (pageX) sliderPageXRef.current = pageX;
+            if (sliderViewRef.current && (sliderViewRef.current as any).measure) {
+              (sliderViewRef.current as any).measure((x: number, y: number, width: number, height: number, pageX: number) => {
+                if (pageX !== undefined) sliderPageXRef.current = pageX;
                 if (width) sliderWidthRef.current = width;
               });
             }
           }}
           {...panResponder.panHandlers}
+          {...(Platform.OS === 'web' ? { onPointerDown: handlePointerDown } : ({} as any))}
         >
           {/* Background Track */}
-          <View style={[styles.sliderTrack, { backgroundColor: theme.dark ? '#333A4D' : '#E0E0E0' }]}>
+          <View
+            pointerEvents="none"
+            style={[styles.sliderTrack, { backgroundColor: theme.dark ? '#333A4D' : '#E0E0E0' }]}
+          >
             {/* Active Progress Fill */}
             <View
+              pointerEvents="none"
               style={[
                 styles.sliderFill,
                 {
@@ -228,6 +331,7 @@ const PlayerScreen = () => {
 
           {/* Draggable Thumb */}
           <View
+            pointerEvents="none"
             style={[
               styles.sliderThumb,
               {
