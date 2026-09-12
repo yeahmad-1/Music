@@ -443,14 +443,29 @@ const LibraryScreen = ({ navigation }: any) => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  headerPadding: { paddingBottom: 10 },
+  container: {
+    flex: 1,
+    height: '100%',
+    minHeight: 0,
+    overflow: 'hidden',
+  },
+  headerPadding: {
+    paddingBottom: 10,
+    flexShrink: 0,
+  },
   searchBar: { margin: 16, borderRadius: 12, elevation: 0, borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)' },
   segmentedControl: { marginHorizontal: 16, marginBottom: 16 },
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
   listItem: { paddingVertical: 4 },
-  list: { flex: 1 },
-  listContent: { paddingBottom: 120, flexGrow: 1 },
+  list: {
+    flex: 1,
+    height: '100%',
+    minHeight: 0,
+  },
+  listContent: {
+    paddingBottom: 160,
+    flexGrow: 1,
+  },
 });
 
 export default LibraryScreen;

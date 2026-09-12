@@ -32,6 +32,7 @@
   "scripts": {
     "start": "expo start",
     "build": "expo export --platform web",
+    "postinstall": "npm run build",
     "serve": "node server.js",
     "android": "expo start --android",
     "ios": "expo start --ios",

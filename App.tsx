@@ -81,11 +81,16 @@ export default function App() {
   const navigationTheme = isDarkMode ? navDarkTheme : navLightTheme;
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={{ flex: 1, height: '100%' }}>
       <AudioProvider>
         <PaperProvider theme={theme}>
           <NavigationContainer theme={navigationTheme}>
-            <Stack.Navigator initialRouteName="Library">
+            <Stack.Navigator 
+              initialRouteName="Library"
+              screenOptions={{
+                cardStyle: { flex: 1, height: '100%' },
+              }}
+            >
               <Stack.Screen 
                 name="Library"
                 component={LibraryScreen}
