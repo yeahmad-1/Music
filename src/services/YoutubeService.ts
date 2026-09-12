@@ -52,6 +52,31 @@ export class YoutubeService {
     const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
     let lastError: any = null;
 
+    // Strategy 0: Server-side API endpoint (Node.js backend, bypasses browser CORS!)
+    if (typeof window !== 'undefined') {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(`/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.success && data.streamUrl) {
+            return {
+              title: data.title,
+              streamUrl: data.streamUrl,
+              videoId: data.videoId || videoId,
+            };
+          }
+        }
+      } catch (err) {
+        // Fall back to client-side strategies
+      }
+    }
+
     // Strategy 1: Cobalt API (fastest and cleanest MP3 audio extraction)
     const cobaltInstances = [
       'https://api.cobalt.tools',

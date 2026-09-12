@@ -1,5 +1,5 @@
 import React, { useState, useLayoutEffect } from 'react';
-import { View, FlatList, StyleSheet, TouchableOpacity, Image } from 'react-native';
+import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform } from 'react-native';
 import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
 import { useAudio } from '../context/AudioContext';
@@ -84,8 +84,27 @@ const LibraryScreen = ({ navigation }: any) => {
 
   const handlePickDocument = async () => {
     try {
+      const audioTypes = Platform.OS === 'ios'
+        ? ['audio/*', 'public.audio']
+        : [
+            'audio/*',
+            'audio/mpeg',
+            'audio/mp3',
+            'audio/wav',
+            'audio/x-m4a',
+            'audio/aac',
+            'audio/flac',
+            'audio/ogg',
+            '.mp3',
+            '.wav',
+            '.m4a',
+            '.aac',
+            '.flac',
+            '.ogg',
+          ];
+
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['audio/*', 'public.audio'],
+        type: audioTypes,
         copyToCacheDirectory: true,
         multiple: true,
       });

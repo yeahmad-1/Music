@@ -1,9 +1,11 @@
 import React, { createContext, useState, useContext, useEffect, useRef } from "react";
+import { Platform } from "react-native";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { YoutubeService } from "../services/YoutubeService";
+import { webAudioStorage } from "../services/WebAudioStorage";
 
 export interface Song {
   id: string;
@@ -85,15 +87,17 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const setupAudio = async () => {
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        staysActiveInBackground: true,
-        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-        playThroughEarpieceAndroid: false,
-      });
+      if (Platform.OS !== 'web') {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          staysActiveInBackground: true,
+          interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+          playThroughEarpieceAndroid: false,
+        });
+      }
     } catch (error) {
       console.log("Error setting up audio mode:", error);
     }
@@ -104,20 +108,38 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const savedPlaylist = await AsyncStorage.getItem("playlist");
       if (savedPlaylist) {
         const parsed: Song[] = JSON.parse(savedPlaylist);
-        // iOS Sandbox Resilience:
-        // On iOS, the sandbox container UUID changes across app reinstalls and updates.
-        // If the stored URI no longer matches the current documentDirectory, update it.
-        const docDir = FileSystem.documentDirectory || "";
-        const updated = parsed.map(song => {
-          if (docDir && song.uri) {
-            const fileName = song.uri.split("/").pop();
-            if (fileName && !song.uri.startsWith(docDir)) {
-              return { ...song, uri: `${docDir}${fileName}` };
+        if (Platform.OS === 'web') {
+          // Rehydrate blob URLs from IndexedDB for web
+          const rehydrated = await Promise.all(
+            parsed.map(async (song) => {
+              try {
+                const freshUrl = await webAudioStorage.getAudioUrl(song.id);
+                if (freshUrl) {
+                  return { ...song, uri: freshUrl };
+                }
+              } catch (e) {
+                console.warn("Could not rehydrate audio for song", song.id, e);
+              }
+              return song;
+            })
+          );
+          setPlaylist(rehydrated);
+        } else {
+          // iOS Sandbox Resilience:
+          // On iOS, the sandbox container UUID changes across app reinstalls and updates.
+          // If the stored URI no longer matches the current documentDirectory, update it.
+          const docDir = FileSystem.documentDirectory || "";
+          const updated = parsed.map(song => {
+            if (docDir && song.uri) {
+              const fileName = song.uri.split("/").pop();
+              if (fileName && !song.uri.startsWith(docDir)) {
+                return { ...song, uri: `${docDir}${fileName}` };
+              }
             }
-          }
-          return song;
-        });
-        setPlaylist(updated);
+            return song;
+          });
+          setPlaylist(updated);
+        }
       }
       const savedCustomPlaylists = await AsyncStorage.getItem("customPlaylists");
       if (savedCustomPlaylists) {
@@ -147,23 +169,44 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const importSongs = async (assets: any[]) => {
     try {
       const newSongs: Song[] = [];
-      const docDir = FileSystem.documentDirectory || "";
+      const isWeb = Platform.OS === 'web';
+      const docDir = isWeb ? "" : (FileSystem.documentDirectory || "");
+
       for (const asset of assets) {
         const rawName = asset.name || "audio.mp3";
         const sanitizedName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_");
-        const fileName = `${Date.now()}_${sanitizedName}`;
-        const destinationUri = `${docDir}${fileName}`;
-        
-        await FileSystem.copyAsync({
-          from: asset.uri,
-          to: destinationUri,
-        });
-
-        // Use clean display name without the file extension
         const displayName = rawName.replace(/\.[^/.]+$/, "") || rawName;
+        const id = Math.random().toString(36).substr(2, 9);
+        let destinationUri = "";
+
+        if (isWeb) {
+          try {
+            let blob: Blob;
+            if (asset.file instanceof Blob) {
+              blob = asset.file;
+            } else if (asset.uri) {
+              const res = await fetch(asset.uri);
+              blob = await res.blob();
+            } else {
+              throw new Error("Unable to read audio file data on web");
+            }
+            destinationUri = await webAudioStorage.storeAudio(id, blob);
+          } catch (webErr) {
+            console.error("Failed to store web audio in IndexedDB:", webErr);
+            destinationUri = asset.uri || "";
+          }
+        } else {
+          const fileName = `${Date.now()}_${sanitizedName}`;
+          destinationUri = `${docDir}${fileName}`;
+          
+          await FileSystem.copyAsync({
+            from: asset.uri,
+            to: destinationUri,
+          });
+        }
 
         newSongs.push({
-          id: Math.random().toString(36).substr(2, 9),
+          id,
           uri: destinationUri,
           name: displayName,
           isFavorite: false,
@@ -188,17 +231,30 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const audioInfo = await YoutubeService.resolveAudio(url);
       const trackName = customName?.trim() || audioInfo.title;
       const sanitizedName = trackName.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
-      const docDir = FileSystem.documentDirectory || "";
-      const destinationUri = `${docDir}${fileName}`;
+      const id = Math.random().toString(36).substr(2, 9);
+      let destinationUri = "";
 
-      const downloadResult = await FileSystem.downloadAsync(audioInfo.streamUrl, destinationUri);
-      if (downloadResult.status !== 200 && downloadResult.status !== 206) {
-        throw new Error(`Download failed with HTTP status ${downloadResult.status}`);
+      if (Platform.OS === 'web') {
+        // In browser: download stream into Blob and store in IndexedDB
+        const response = await fetch(audioInfo.streamUrl);
+        if (!response.ok) {
+          throw new Error(`Download failed with HTTP status ${response.status}`);
+        }
+        const blob = await response.blob();
+        destinationUri = await webAudioStorage.storeAudio(id, blob);
+      } else {
+        const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
+        const docDir = FileSystem.documentDirectory || "";
+        destinationUri = `${docDir}${fileName}`;
+
+        const downloadResult = await FileSystem.downloadAsync(audioInfo.streamUrl, destinationUri);
+        if (downloadResult.status !== 200 && downloadResult.status !== 206) {
+          throw new Error(`Download failed with HTTP status ${downloadResult.status}`);
+        }
       }
 
       const newSong: Song = {
-        id: Math.random().toString(36).substr(2, 9),
+        id,
         uri: destinationUri,
         name: trackName,
         isFavorite: false,
@@ -311,7 +367,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const songToDelete = playlist.find(s => s.id === id);
     if (songToDelete) {
       try {
-        await FileSystem.deleteAsync(songToDelete.uri, { idempotent: true });
+        if (Platform.OS === 'web') {
+          await webAudioStorage.deleteAudio(id);
+        } else {
+          await FileSystem.deleteAsync(songToDelete.uri, { idempotent: true });
+        }
         const updatedPlaylist = playlist.filter(s => s.id !== id);
         setPlaylist(updatedPlaylist);
         await savePlaylist(updatedPlaylist);
@@ -344,7 +404,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     for (const song of deleted) {
       try {
-        await FileSystem.deleteAsync(song.uri, { idempotent: true });
+        if (Platform.OS === 'web') {
+          await webAudioStorage.deleteAudio(song.id);
+        } else {
+          await FileSystem.deleteAsync(song.uri, { idempotent: true });
+        }
       } catch (error) {
         console.error("Error deleting song file", error);
       }
