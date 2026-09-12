@@ -49,6 +49,8 @@ interface AudioContextType {
   seek: (position: number) => Promise<void>;
   createCustomPlaylist: (name: string, songIds: string[]) => Promise<void>;
   deleteCustomPlaylist: (id: string) => Promise<void>;
+  updateCustomPlaylistOrder: (playlistId: string, newSongIds: string[]) => Promise<void>;
+  removeSongsFromCustomPlaylist: (playlistId: string, songIds: string[]) => Promise<void>;
   reorderSongs: (oldIndex: number, newIndex: number) => Promise<void>;
   updatePlaylistOrder: (newPlaylist: Song[]) => Promise<void>;
 }
@@ -364,74 +366,89 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const deleteSong = async (id: string) => {
-    const songToDelete = playlist.find(s => s.id === id);
-    if (songToDelete) {
-      try {
-        if (Platform.OS === 'web') {
-          await webAudioStorage.deleteAudio(id);
-        } else {
-          await FileSystem.deleteAsync(songToDelete.uri, { idempotent: true });
-        }
-        const updatedPlaylist = playlist.filter(s => s.id !== id);
-        setPlaylist(updatedPlaylist);
-        await savePlaylist(updatedPlaylist);
-        
-        const updatedCustom = customPlaylists.map(cp => ({
-          ...cp,
-          songIds: cp.songIds.filter(sid => sid !== id)
-        }));
-        setCustomPlaylists(updatedCustom);
-        await saveCustomPlaylists(updatedCustom);
+    try {
+      const songToDelete = playlist.find(s => s.id === id);
+      if (!songToDelete) return;
 
-        if (currentSong?.id === id) {
-          if (soundRef.current) {
-            await soundRef.current.unloadAsync().catch(() => {});
-            soundRef.current = null;
-            setSound(null);
-          }
-          setCurrentSong(null);
-          setIsPlaying(false);
+      if (Platform.OS === 'web') {
+        if (songToDelete.uri && songToDelete.uri.startsWith('blob:')) {
+          try { URL.revokeObjectURL(songToDelete.uri); } catch (_) {}
         }
-      } catch (error) {
-        console.error("Error deleting song file", error);
+        await webAudioStorage.deleteAudio(id);
+      } else {
+        await FileSystem.deleteAsync(songToDelete.uri, { idempotent: true }).catch(() => {});
       }
+
+      const updatedPlaylist = playlist.filter(s => s.id !== id);
+      setPlaylist(updatedPlaylist);
+      setCurrentQueue(prev => prev.filter(s => s.id !== id));
+      await savePlaylist(updatedPlaylist);
+      
+      const updatedCustom = customPlaylists.map(cp => ({
+        ...cp,
+        songIds: cp.songIds.filter(sid => sid !== id)
+      }));
+      setCustomPlaylists(updatedCustom);
+      await saveCustomPlaylists(updatedCustom);
+
+      if (currentSong?.id === id) {
+        if (soundRef.current) {
+          await soundRef.current.unloadAsync().catch(() => {});
+          soundRef.current = null;
+          setSound(null);
+        }
+        setCurrentSong(null);
+        setIsPlaying(false);
+        setPlaybackStatus(null);
+      }
+    } catch (error) {
+      console.error("Error deleting song file", error);
     }
   };
 
   const deleteSongsBulk = async (ids: string[]) => {
-    const remaining = playlist.filter(s => !ids.includes(s.id));
-    const deleted = playlist.filter(s => ids.includes(s.id));
+    try {
+      const remaining = playlist.filter(s => !ids.includes(s.id));
+      const deleted = playlist.filter(s => ids.includes(s.id));
 
-    for (const song of deleted) {
-      try {
-        if (Platform.OS === 'web') {
-          await webAudioStorage.deleteAudio(song.id);
-        } else {
-          await FileSystem.deleteAsync(song.uri, { idempotent: true });
+      for (const song of deleted) {
+        try {
+          if (Platform.OS === 'web') {
+            if (song.uri && song.uri.startsWith('blob:')) {
+              try { URL.revokeObjectURL(song.uri); } catch (_) {}
+            }
+            await webAudioStorage.deleteAudio(song.id);
+          } else {
+            await FileSystem.deleteAsync(song.uri, { idempotent: true }).catch(() => {});
+          }
+        } catch (error) {
+          console.error("Error deleting song file", error);
         }
-      } catch (error) {
-        console.error("Error deleting song file", error);
       }
-    }
 
-    setPlaylist(remaining);
-    await savePlaylist(remaining);
+      setPlaylist(remaining);
+      setCurrentQueue(prev => prev.filter(s => !ids.includes(s.id)));
+      await savePlaylist(remaining);
 
-    const updatedCustom = customPlaylists.map(cp => ({
-      ...cp,
-      songIds: cp.songIds.filter(sid => !ids.includes(sid))
-    }));
-    setCustomPlaylists(updatedCustom);
-    await saveCustomPlaylists(updatedCustom);
+      const updatedCustom = customPlaylists.map(cp => ({
+        ...cp,
+        songIds: cp.songIds.filter(sid => !ids.includes(sid))
+      }));
+      setCustomPlaylists(updatedCustom);
+      await saveCustomPlaylists(updatedCustom);
 
-    if (currentSong && ids.includes(currentSong.id)) {
-      if (soundRef.current) {
-        await soundRef.current.unloadAsync().catch(() => {});
-        soundRef.current = null;
-        setSound(null);
+      if (currentSong && ids.includes(currentSong.id)) {
+        if (soundRef.current) {
+          await soundRef.current.unloadAsync().catch(() => {});
+          soundRef.current = null;
+          setSound(null);
+        }
+        setCurrentSong(null);
+        setIsPlaying(false);
+        setPlaybackStatus(null);
       }
-      setCurrentSong(null);
-      setIsPlaying(false);
+    } catch (error) {
+      console.error("Error deleting song files", error);
     }
   };
 
@@ -494,18 +511,30 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const [moved] = updated.splice(oldIndex, 1);
     updated.splice(newIndex, 0, moved);
     setPlaylist(updated);
+    setCurrentQueue(updated);
     await savePlaylist(updated);
-    if (currentQueue === playlist) {
-      setCurrentQueue(updated);
-    }
   };
 
   const updatePlaylistOrder = async (newPlaylist: Song[]) => {
     setPlaylist(newPlaylist);
+    setCurrentQueue(newPlaylist);
     await savePlaylist(newPlaylist);
-    if (currentQueue === playlist) {
-      setCurrentQueue(newPlaylist);
-    }
+  };
+
+  const updateCustomPlaylistOrder = async (playlistId: string, newSongIds: string[]) => {
+    const updated = customPlaylists.map(cp =>
+      cp.id === playlistId ? { ...cp, songIds: newSongIds } : cp
+    );
+    setCustomPlaylists(updated);
+    await saveCustomPlaylists(updated);
+  };
+
+  const removeSongsFromCustomPlaylist = async (playlistId: string, songIds: string[]) => {
+    const updated = customPlaylists.map(cp =>
+      cp.id === playlistId ? { ...cp, songIds: cp.songIds.filter(id => !songIds.includes(id)) } : cp
+    );
+    setCustomPlaylists(updated);
+    await saveCustomPlaylists(updated);
   };
 
   return (
@@ -533,6 +562,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       seek,
       createCustomPlaylist,
       deleteCustomPlaylist,
+      updateCustomPlaylistOrder,
+      removeSongsFromCustomPlaylist,
       reorderSongs,
       updatePlaylistOrder
     }}>
