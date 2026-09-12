@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, Alert } from 'react-native';
 import { Text, Switch, Divider, useTheme, Button, TextInput, Dialog, Portal, IconButton, Card } from 'react-native-paper';
 import { adService, WheelAdConfig, defaultAdConfig } from '../services/AdService';
@@ -89,7 +89,7 @@ const SettingsScreen = ({ route }: any) => {
       enabled: keepAliveConfig.enabled,
     });
     setKeepAliveConfig(updated);
-    setPingFeedback('Keep-Alive configuration saved! Server will be pinged every 5 minutes.');
+    setPingFeedback('Keep-Alive configuration saved! Server will be pinged every 4 minutes.');
     setTimeout(() => setPingFeedback(null), 4000);
   };
 
@@ -115,11 +115,11 @@ const SettingsScreen = ({ route }: any) => {
             Server Keep-Alive Heartbeat
           </Text>
           <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 12 }}>
-            Automatically sends a lightweight request to your backend every 5 minutes to prevent free-tier cloud servers (Render, Heroku, Railway, etc.) from sleeping.
+            Automatically sends a lightweight request to your backend every 4 minutes to prevent free-tier cloud servers (Render, Heroku, Railway, etc.) from sleeping.
           </Text>
 
           <View style={[styles.row, { paddingVertical: 4 }]}>
-            <Text style={{ color: theme.colors.onSurface, fontSize: 15, fontWeight: 'bold' }}>5-Minute Heartbeat Ping</Text>
+            <Text style={{ color: theme.colors.onSurface, fontSize: 15, fontWeight: 'bold' }}>4-Minute Heartbeat Ping</Text>
             <Switch
               value={keepAliveConfig.enabled}
               onValueChange={async (val) => {

@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 export interface KeepAliveConfig {
   enabled: boolean;
   serverUrl: string;
-  intervalMinutes: number; // default: 5 minutes
+  intervalMinutes: number; // default: 4 minutes
   lastPingTime?: number;
   lastPingStatus?: string;
 }
@@ -12,12 +12,12 @@ const KEEP_ALIVE_KEY = 'keep_alive_config';
 const DEFAULT_CONFIG: KeepAliveConfig = {
   enabled: false,
   serverUrl: '',
-  intervalMinutes: 5,
+  intervalMinutes: 4,
 };
 
 /**
  * Service that sends an HTTP keep-alive heartbeat ping to a server
- * every 5 minutes to prevent free-tier cloud servers (Render, Heroku, Railway, etc.)
+ * every 4 minutes to prevent free-tier cloud servers (Render, Heroku, Railway, etc.)
  * from going to sleep / spinning down.
  */
 class KeepAliveService {
@@ -72,7 +72,7 @@ class KeepAliveService {
     }
 
     if (this.config.enabled && this.config.serverUrl && this.config.serverUrl.trim().startsWith('http')) {
-      const intervalMs = (this.config.intervalMinutes || 5) * 60 * 1000;
+      const intervalMs = (this.config.intervalMinutes || 4) * 60 * 1000;
       // Send an initial ping if none was sent recently
       const shouldSendInitial = !this.config.lastPingTime || (Date.now() - this.config.lastPingTime > intervalMs);
       if (shouldSendInitial) {

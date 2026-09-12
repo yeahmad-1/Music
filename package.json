@@ -31,6 +31,8 @@
   },
   "scripts": {
     "start": "expo start",
+    "build": "expo export --platform web",
+    "serve": "node server.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
