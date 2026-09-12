@@ -6,8 +6,12 @@ A sleek, offline music player built with React Native and Expo (SDK 54). Feature
 
 ## ✨ Features
 
+- **📥 Direct YouTube Audio Downloader**: Paste any YouTube video or Shorts link directly into the app to extract audio and save it as an offline MP3.
+- **🕒 "Recently Added" Smart Queue**: Instantly view and play your latest imported and downloaded songs sorted by newest first.
 - **📂 Offline Document Importing**: Import audio tracks (`.mp3`, `.m4a`, `.wav`, etc.) directly from your device storage or iCloud Drive via native document picker.
 - **🎧 Seamless Background Playback**: Configured with iOS `UIBackgroundModes` audio and Expo AV for persistent background audio even when the screen is locked.
+- **🎡 Revolving Wheel Sponsor Ads**: An aesthetic, rotating disc in the player that showcases custom sponsor graphics and directs listeners to sponsor websites on tap.
+- **👑 Owner-Only Admin Portal**: Protected by an Owner Secret PIN (`1994` by default) in Settings to configure wheel ads, sponsor links, and remote sync endpoints post-deployment without rebuilding the app.
 - **🔀 Playback Modes**: Loop one track, loop entire playlist, or shuffle music seamlessly.
 - **❤️ Favorites & Custom Playlists**: Organize your library into personalized playlists and like your favorite tracks.
 - **↕️ Drag & Drop Reordering**: Reorder songs in your library queue dynamically.
@@ -15,6 +19,7 @@ A sleek, offline music player built with React Native and Expo (SDK 54). Feature
   - **Synthwave Night (Dark)**: Deep navy, neon cyan, and hot pink accents.
   - **Sakura Minimalist (Light)**: Soft tint surface with vibrant cherry accents.
 - **🛡️ iOS Sandbox Resilient**: Local document paths are automatically reconciled across app restarts and iOS container updates.
+
 
 ---
 

@@ -1,7 +1,8 @@
-import React, { useEffect, useRef } from 'react';
-import { View, StyleSheet, Animated, Dimensions, Image } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking } from 'react-native';
 import { IconButton, Text, ProgressBar, Surface, useTheme } from 'react-native-paper';
 import { useAudio } from '../context/AudioContext';
+import { adService, WheelAdConfig } from '../services/AdService';
 
 const { width } = Dimensions.get('window');
 
@@ -14,6 +15,21 @@ const PlayerScreen = () => {
 
   const theme = useTheme();
   const rotateAnim = useRef(new Animated.Value(0)).current;
+  const [adConfig, setAdConfig] = useState<WheelAdConfig | null>(null);
+
+  useEffect(() => {
+    adService.getAdConfig().then((cfg) => {
+      setAdConfig(cfg);
+    });
+  }, []);
+
+  const handleWheelPress = () => {
+    if (adConfig && adConfig.enabled && adConfig.targetUrl) {
+      Linking.openURL(adConfig.targetUrl).catch((err) =>
+        console.log('Error opening sponsor link:', err)
+      );
+    }
+  };
 
   useEffect(() => {
     if (isPlaying) {
@@ -60,19 +76,54 @@ const PlayerScreen = () => {
 
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
-      <Animated.View style={[styles.albumArtContainer, { transform: [{ rotate: rotation }] }]}>
-        <Surface style={[styles.surface, {
-          backgroundColor: theme.dark ? '#0F3460' : '#FFF0F3',
-          borderColor: theme.colors.primary,
-          borderWidth: 3,
-          shadowColor: theme.colors.primary,
-          shadowOffset: { width: 0, height: 0 },
-          shadowOpacity: theme.dark ? 0.8 : 0.3,
-          shadowRadius: 20,
-        }]} elevation={5}>
-          <Image source={require("../../assets/icon.png")} style={{ width: 220, height: 220, borderRadius: 110 }} />
-        </Surface>
-      </Animated.View>
+      <TouchableOpacity
+        activeOpacity={adConfig?.enabled && adConfig?.targetUrl ? 0.85 : 1}
+        onPress={handleWheelPress}
+      >
+        <Animated.View style={[styles.albumArtContainer, { transform: [{ rotate: rotation }] }]}>
+          <Surface style={[styles.surface, {
+            backgroundColor: theme.dark ? '#0F3460' : '#FFF0F3',
+            borderColor: adConfig?.enabled ? theme.colors.secondary : theme.colors.primary,
+            borderWidth: 3,
+            shadowColor: adConfig?.enabled ? theme.colors.secondary : theme.colors.primary,
+            shadowOffset: { width: 0, height: 0 },
+            shadowOpacity: theme.dark ? 0.8 : 0.3,
+            shadowRadius: 20,
+          }]} elevation={5}>
+            {adConfig?.enabled && adConfig?.imageUrl ? (
+              <Image
+                source={{ uri: adConfig.imageUrl }}
+                style={{ width: 220, height: 220, borderRadius: 110 }}
+              />
+            ) : (
+              <Image
+                source={require("../../assets/icon.png")}
+                style={{ width: 220, height: 220, borderRadius: 110 }}
+              />
+            )}
+          </Surface>
+        </Animated.View>
+      </TouchableOpacity>
+
+      {adConfig?.enabled && (
+        <TouchableOpacity
+          onPress={handleWheelPress}
+          style={{
+            marginTop: -38,
+            marginBottom: 20,
+            paddingHorizontal: 12,
+            paddingVertical: 3,
+            borderRadius: 12,
+            backgroundColor: theme.colors.secondaryContainer,
+            borderWidth: 1,
+            borderColor: theme.colors.secondary,
+          }}
+        >
+          <Text variant="labelSmall" style={{ color: theme.colors.secondary, fontWeight: 'bold', letterSpacing: 1 }}>
+            {adConfig.sponsorName ? `SPONSORED • ${adConfig.sponsorName.toUpperCase()}` : 'SPONSORED'}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       <View style={styles.infoContainer}>
         <View style={{ flex: 1 }}>

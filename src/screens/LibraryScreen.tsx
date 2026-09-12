@@ -1,12 +1,12 @@
 import React, { useState, useLayoutEffect } from 'react';
 import { View, FlatList, StyleSheet, TouchableOpacity, Image } from 'react-native';
-import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button } from 'react-native-paper';
+import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
 import { useAudio } from '../context/AudioContext';
 import DragList, { DragListRenderItemInfo } from 'react-native-draglist';
 
 const LibraryScreen = ({ navigation }: any) => {
-  const { playlist, customPlaylists, importSongs, playSong, deleteSongsBulk, currentSong, isPlaying, setFavoritesBulk, createCustomPlaylist, deleteCustomPlaylist, updatePlaylistOrder } = useAudio();
+  const { playlist, customPlaylists, importSongs, downloadFromYoutube, playSong, deleteSongsBulk, currentSong, isPlaying, setFavoritesBulk, createCustomPlaylist, deleteCustomPlaylist, updatePlaylistOrder } = useAudio();
   const theme = useTheme();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -18,6 +18,13 @@ const LibraryScreen = ({ navigation }: any) => {
   const [isPlaylistModalVisible, setIsPlaylistModalVisible] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [viewingPlaylistId, setViewingPlaylistId] = useState<string | null>(null);
+
+  // YouTube Downloader State
+  const [isYoutubeModalVisible, setIsYoutubeModalVisible] = useState(false);
+  const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [youtubeCustomTitle, setYoutubeCustomTitle] = useState('');
+  const [isDownloadingYt, setIsDownloadingYt] = useState(false);
+  const [ytDownloadError, setYtDownloadError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     if (selectedIds.length > 0) {
@@ -53,10 +60,19 @@ const LibraryScreen = ({ navigation }: any) => {
                 onPress={() => setIsReorderMode(!isReorderMode)}
               />
             )}
+            <IconButton
+              icon="youtube"
+              iconColor="#FF0000"
+              onPress={() => {
+                setYtDownloadError(null);
+                setIsYoutubeModalVisible(true);
+              }}
+            />
             <Menu
               visible={menuVisible}
               onDismiss={() => setMenuVisible(false)}
               anchor={<Appbar.Action icon="dots-vertical" onPress={() => setMenuVisible(true)} />}>
+              <Menu.Item onPress={() => { setMenuVisible(false); setIsYoutubeModalVisible(true); }} title="Download from YouTube" leadingIcon="youtube" />
               <Menu.Item onPress={() => { setMenuVisible(false); handlePickDocument(); }} title="Import Music" leadingIcon="file-import" />
               <Menu.Item onPress={() => { setMenuVisible(false); navigation.navigate('Settings'); }} title="Settings" leadingIcon="cog" />
             </Menu>
@@ -78,6 +94,27 @@ const LibraryScreen = ({ navigation }: any) => {
       }
     } catch (err) {
       console.error('Error picking document', err);
+    }
+  };
+
+  const handleDownloadYoutube = async () => {
+    if (!youtubeUrl.trim() || isDownloadingYt) return;
+    setIsDownloadingYt(true);
+    setYtDownloadError(null);
+    try {
+      const result = await downloadFromYoutube(youtubeUrl.trim(), youtubeCustomTitle.trim() || undefined);
+      if (result.success) {
+        setIsYoutubeModalVisible(false);
+        setYoutubeUrl('');
+        setYoutubeCustomTitle('');
+        setActiveTab('recent');
+      } else {
+        setYtDownloadError(result.message || 'Download failed. Please check the URL.');
+      }
+    } catch (err: any) {
+      setYtDownloadError(err?.message || 'Download failed.');
+    } finally {
+      setIsDownloadingYt(false);
     }
   };
 
@@ -118,9 +155,16 @@ const LibraryScreen = ({ navigation }: any) => {
   } else {
     currentDisplayList = playlist.filter(song => {
       const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesTab = activeTab === 'all' || (activeTab === 'favorites' && song.isFavorite);
+      const matchesTab =
+        activeTab === 'all' ||
+        activeTab === 'recent' ||
+        (activeTab === 'favorites' && song.isFavorite);
       return matchesSearch && matchesTab;
     });
+
+    if (activeTab === 'recent') {
+      currentDisplayList = [...currentDisplayList].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    }
   }
 
   const renderPlaylistItem = ({ item }: { item: any }) => (
@@ -219,6 +263,7 @@ const LibraryScreen = ({ navigation }: any) => {
             }}
             buttons={[
               { value: 'all', label: 'All' },
+              { value: 'recent', label: 'Recent' },
               { value: 'favorites', label: 'Liked' },
               { value: 'playlists', label: 'Lists' },
             ]}
@@ -257,7 +302,7 @@ const LibraryScreen = ({ navigation }: any) => {
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Text variant="titleMedium" style={{ color: theme.colors.onSurface }}>
-                  {activeTab === 'favorites' ? 'No favorites yet.' : 'Empty library.'}
+                  {activeTab === 'recent' ? 'No recently added songs.' : activeTab === 'favorites' ? 'No favorites yet.' : 'Empty library.'}
                 </Text>
               </View>
             }
@@ -266,6 +311,84 @@ const LibraryScreen = ({ navigation }: any) => {
       )}
 
       <Portal>
+        {/* YouTube Downloader Dialog */}
+        <Dialog
+          visible={isYoutubeModalVisible}
+          onDismiss={() => {
+            if (!isDownloadingYt) {
+              setIsYoutubeModalVisible(false);
+              setYtDownloadError(null);
+            }
+          }}
+          style={{ backgroundColor: theme.colors.surface }}
+        >
+          <Dialog.Title style={{ fontWeight: 'bold' }}>Download from YouTube</Dialog.Title>
+          <Dialog.Content>
+            <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 14 }}>
+              Paste any YouTube video or shorts link to download its audio directly as an MP3 for offline listening.
+            </Text>
+            <TextInput
+              label="YouTube Video / Shorts Link"
+              placeholder="https://youtube.com/watch?v=..."
+              value={youtubeUrl}
+              onChangeText={(text) => {
+                setYoutubeUrl(text);
+                setYtDownloadError(null);
+              }}
+              mode="outlined"
+              activeOutlineColor="#FF0000"
+              style={{ marginBottom: 12 }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              disabled={isDownloadingYt}
+            />
+            <TextInput
+              label="Custom Track Title (Optional)"
+              placeholder="Leave blank to use video title"
+              value={youtubeCustomTitle}
+              onChangeText={setYoutubeCustomTitle}
+              mode="outlined"
+              activeOutlineColor={theme.colors.primary}
+              style={{ marginBottom: 12 }}
+              disabled={isDownloadingYt}
+            />
+            {isDownloadingYt && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 8 }}>
+                <ActivityIndicator animating={true} color={theme.colors.primary} size="small" style={{ marginRight: 10 }} />
+                <Text variant="bodySmall" style={{ color: theme.colors.primary, fontWeight: 'bold' }}>
+                  Extracting audio stream & downloading MP3...
+                </Text>
+              </View>
+            )}
+            {ytDownloadError && (
+              <Text variant="bodySmall" style={{ color: '#D32F2F', marginTop: 4 }}>
+                {ytDownloadError}
+              </Text>
+            )}
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button
+              onPress={() => {
+                setIsYoutubeModalVisible(false);
+                setYtDownloadError(null);
+              }}
+              disabled={isDownloadingYt}
+            >
+              Cancel
+            </Button>
+            <Button
+              onPress={handleDownloadYoutube}
+              loading={isDownloadingYt}
+              disabled={!youtubeUrl.trim() || isDownloadingYt}
+              textColor="#FF0000"
+              icon="download"
+            >
+              Download
+            </Button>
+          </Dialog.Actions>
+        </Dialog>
+
+        {/* Create Playlist Modal */}
         <Dialog visible={isPlaylistModalVisible} onDismiss={() => setIsPlaylistModalVisible(false)} style={{ backgroundColor: theme.colors.surface }}>
           <Dialog.Title>Create Playlist</Dialog.Title>
           <Dialog.Content>

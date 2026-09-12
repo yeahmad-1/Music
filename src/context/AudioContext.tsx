@@ -3,11 +3,16 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { YoutubeService } from "../services/YoutubeService";
+
 export interface Song {
   id: string;
   uri: string;
   name: string;
   isFavorite: boolean;
+  addedAt?: number;
+  source?: "local" | "youtube";
+  sourceUrl?: string;
 }
 
 export interface CustomPlaylist {
@@ -27,6 +32,7 @@ interface AudioContextType {
   isShuffle: boolean;
   repeatMode: RepeatMode;
   importSongs: (assets: any[]) => Promise<void>;
+  downloadFromYoutube: (url: string, customName?: string) => Promise<{ success: boolean; message?: string; song?: Song }>;
   playSong: (song: Song, customQueue?: Song[]) => Promise<void>;
   pauseSong: () => Promise<void>;
   resumeSong: () => Promise<void>;
@@ -161,14 +167,54 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           uri: destinationUri,
           name: displayName,
           isFavorite: false,
+          addedAt: Date.now(),
+          source: "local",
         });
       }
 
-      const updatedPlaylist = [...playlist, ...newSongs];
+      const updatedPlaylist = [...newSongs, ...playlist];
       setPlaylist(updatedPlaylist);
       await savePlaylist(updatedPlaylist);
     } catch (error) {
       console.error("Error importing songs", error);
+    }
+  };
+
+  const downloadFromYoutube = async (
+    url: string,
+    customName?: string
+  ): Promise<{ success: boolean; message?: string; song?: Song }> => {
+    try {
+      const audioInfo = await YoutubeService.resolveAudio(url);
+      const trackName = customName?.trim() || audioInfo.title;
+      const sanitizedName = trackName.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
+      const docDir = FileSystem.documentDirectory || "";
+      const destinationUri = `${docDir}${fileName}`;
+
+      const downloadResult = await FileSystem.downloadAsync(audioInfo.streamUrl, destinationUri);
+      if (downloadResult.status !== 200 && downloadResult.status !== 206) {
+        throw new Error(`Download failed with HTTP status ${downloadResult.status}`);
+      }
+
+      const newSong: Song = {
+        id: Math.random().toString(36).substr(2, 9),
+        uri: destinationUri,
+        name: trackName,
+        isFavorite: false,
+        addedAt: Date.now(),
+        source: "youtube",
+        sourceUrl: url,
+      };
+
+      const updatedPlaylist = [newSong, ...playlist];
+      setPlaylist(updatedPlaylist);
+      await savePlaylist(updatedPlaylist);
+
+      return { success: true, song: newSong };
+    } catch (err: any) {
+      console.error("Error downloading from YouTube:", err);
+      return { success: false, message: err?.message || "Failed to download audio from YouTube" };
     }
   };
 
@@ -407,6 +453,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       isShuffle,
       repeatMode,
       importSongs,
+      downloadFromYoutube,
       playSong,
       pauseSong,
       resumeSong,
