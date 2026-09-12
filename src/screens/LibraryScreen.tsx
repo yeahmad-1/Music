@@ -296,6 +296,12 @@ const LibraryScreen = ({ navigation }: any) => {
           data={customPlaylists}
           keyExtractor={(item) => item.id}
           renderItem={renderPlaylistItem}
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          initialNumToRender={50}
+          maxToRenderPerBatch={50}
+          showsVerticalScrollIndicator={true}
+          keyboardShouldPersistTaps="handled"
           ItemSeparatorComponent={() => <Divider style={{ backgroundColor: 'transparent', height: 8 }} />}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
@@ -310,13 +316,20 @@ const LibraryScreen = ({ navigation }: any) => {
             keyExtractor={(item: any) => item.id}
             onReordered={onReorder}
             renderItem={renderItem}
-            containerStyle={{ flex: 1 }}
+            containerStyle={styles.list}
+            contentContainerStyle={styles.listContent}
           />
         ) : (
           <FlatList
             data={currentDisplayList}
             keyExtractor={(item) => item.id}
             renderItem={(params) => renderItem({ ...params, onDragStart: () => {}, onDragEnd: () => {}, onStartDrag: () => {}, onEndDrag: () => {}, isActive: false })}
+            style={styles.list}
+            contentContainerStyle={styles.listContent}
+            initialNumToRender={50}
+            maxToRenderPerBatch={50}
+            showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
             ItemSeparatorComponent={() => <Divider style={{ backgroundColor: 'transparent', height: 4 }} />}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
@@ -435,7 +448,9 @@ const styles = StyleSheet.create({
   searchBar: { margin: 16, borderRadius: 12, elevation: 0, borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)' },
   segmentedControl: { marginHorizontal: 16, marginBottom: 16 },
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
-  listItem: { paddingVertical: 4 }
+  listItem: { paddingVertical: 4 },
+  list: { flex: 1 },
+  listContent: { paddingBottom: 120, flexGrow: 1 },
 });
 
 export default LibraryScreen;

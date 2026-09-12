@@ -77,7 +77,59 @@ export class YoutubeService {
       }
     }
 
-    // Strategy 1: Cobalt API (fastest and cleanest MP3 audio extraction)
+    // Strategy 1: VidsSave high-speed audio extraction engine
+    try {
+      const vidssaveRes = await fetch('https://api.vidssave.com/api/contentsite_api/media/parse', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Origin': 'https://id.vidssave.com',
+          'Referer': 'https://id.vidssave.com/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        body: `auth=20250901majwlqo&domain=api-ak.vidssave.com&origin=source&link=${encodeURIComponent(fullUrl)}`,
+      });
+      if (vidssaveRes.ok) {
+        const j = await vidssaveRes.json();
+        if (j.status === 1 && j.data) {
+          const rawTitle = j.data.title || `YouTube Audio - ${videoId}`;
+          const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
+          const resources = j.data.resources || [];
+          const audioResources = resources.filter((r: any) => r.type === 'audio');
+
+          // Check for converted MP3 download
+          const mp3 = audioResources.find((r: any) => r.format === 'MP3' && r.resource_content) || audioResources.find((r: any) => r.resource_content);
+          if (mp3) {
+            try {
+              const r1 = await fetch('https://api.vidssave.com/api/contentsite_api/media/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://id.vidssave.com', Referer: 'https://id.vidssave.com/' },
+                body: `auth=20250901majwlqo&domain=api-ak.vidssave.com&request=${encodeURIComponent(mp3.resource_content)}&no_encrypt=1`,
+              });
+              const j1 = await r1.json();
+              if (j1 && j1.status === 1 && j1.data?.task_id) {
+                const q = `auth=20250901majwlqo&domain=api-ak.vidssave.com&task_id=${encodeURIComponent(j1.data.task_id)}&download_domain=vidssave.com&origin=content_site`;
+                const r2 = await fetch(`https://api.vidssave.com/api/contentsite_api/media/download_query?${q}`);
+                const text = await r2.text();
+                const m = text.match(/"download_link":"([^"]+)"/);
+                if (m && m[1]) {
+                  return { title, streamUrl: m[1].replace(/\\/g, ''), videoId };
+                }
+              }
+            } catch (convErr) {}
+          }
+
+          const directAudio = audioResources.find((r: any) => r.download_url);
+          if (directAudio && directAudio.download_url) {
+            return { title, streamUrl: directAudio.download_url, videoId };
+          }
+        }
+      }
+    } catch (vErr) {
+      lastError = vErr;
+    }
+
+    // Strategy 2: Cobalt API (fastest and cleanest MP3 audio extraction)
     const cobaltInstances = [
       'https://api.cobalt.tools',
       'https://cobalt-api.kwiatekm.tokyo',

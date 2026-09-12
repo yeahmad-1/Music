@@ -38,11 +38,118 @@ function extractVideoId(urlStr) {
   return null;
 }
 
+const { Readable } = require('stream');
+
+const VIDSSAVE_API_BASE = 'https://api.vidssave.com/api/contentsite_api';
+const VIDSSAVE_DOMAIN = 'api-ak.vidssave.com';
+let VIDSSAVE_AUTH = '20250901majwlqo';
+
+async function refreshVidssaveAuth() {
+  try {
+    const html = await (await fetch('https://id.vidssave.com/home-1ey')).text();
+    const matches = html.match(/src=["']([^"']+\.js)["']/g) || [];
+    for (const match of matches) {
+      const pathMatch = match.match(/src=["']([^"']+)["']/);
+      if (!pathMatch) continue;
+      const url = pathMatch[1].startsWith('http') ? pathMatch[1] : 'https://id.vidssave.com' + pathMatch[1];
+      try {
+        const js = await (await fetch(url)).text();
+        const m = js.match(/auth[":=]+([0-9]{8}[a-z0-9]+)/i);
+        if (m) {
+          VIDSSAVE_AUTH = m[1];
+          return VIDSSAVE_AUTH;
+        }
+      } catch {}
+    }
+  } catch {}
+  return VIDSSAVE_AUTH;
+}
+
 async function resolveYouTubeAudio(videoUrl) {
   const videoId = extractVideoId(videoUrl);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
   const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  let lastError = null;
+
+  // Primary Strategy: High-speed VidsSave conversion & extraction engine
+  try {
+    await refreshVidssaveAuth();
+    const callParse = (origin) => fetch(`${VIDSSAVE_API_BASE}/media/parse`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': 'https://id.vidssave.com',
+        'Referer': 'https://id.vidssave.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      body: new URLSearchParams({ auth: VIDSSAVE_AUTH, domain: VIDSSAVE_DOMAIN, origin, link: fullUrl }),
+    }).then(r => r.json());
+
+    const [src, cache] = await Promise.all([
+      callParse('source').catch(() => null),
+      callParse('cache').catch(() => null),
+    ]);
+
+    const json = (src && src.status === 1) ? src : cache;
+    if (json && json.status === 1 && json.data) {
+      const rawTitle = json.data.title || `YouTube Audio - ${videoId}`;
+      const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
+      const resources = json.data.resources || [];
+      const audioResources = resources.filter(r => r.type === 'audio');
+
+      // 1. Try converted MP3 download stream
+      const mp3Resource = audioResources.find(r => r.format === 'MP3' && r.resource_content) || audioResources.find(r => r.resource_content);
+      if (mp3Resource) {
+        try {
+          const body = new URLSearchParams({
+            auth: VIDSSAVE_AUTH,
+            domain: VIDSSAVE_DOMAIN,
+            request: mp3Resource.resource_content,
+            no_encrypt: '1',
+          });
+          const r1 = await fetch(`${VIDSSAVE_API_BASE}/media/download`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Origin': 'https://id.vidssave.com',
+              'Referer': 'https://id.vidssave.com/',
+            },
+            body,
+          });
+          const j1 = await r1.json();
+          if (j1 && j1.status === 1 && j1.data?.task_id) {
+            const q = new URLSearchParams({
+              auth: VIDSSAVE_AUTH,
+              domain: VIDSSAVE_DOMAIN,
+              task_id: j1.data.task_id,
+              download_domain: 'vidssave.com',
+              origin: 'content_site',
+            });
+            const r2 = await fetch(`${VIDSSAVE_API_BASE}/media/download_query?${q}`);
+            const text = await r2.text();
+            const m = text.match(/"download_link":"([^"]+)"/);
+            if (m && m[1]) {
+              const directLink = m[1].replace(/\\/g, '');
+              return { title, streamUrl: directLink, videoId };
+            }
+          }
+        } catch (convErr) {
+          // Fall through to direct download_url
+        }
+      }
+
+      // 2. Direct download_url fallback
+      const directAudio = audioResources.find(r => r.download_url);
+      if (directAudio && directAudio.download_url) {
+        return { title, streamUrl: directAudio.download_url, videoId };
+      }
+    }
+  } catch (err) {
+    lastError = err;
+  }
+
+  // Fallback Strategy: Cobalt API
   const cobaltEndpoints = [
     'https://api.cobalt.tools',
     'https://cobalt-api.kwiatekm.tokyo',
@@ -75,12 +182,10 @@ async function resolveYouTubeAudio(videoUrl) {
           };
         }
       }
-    } catch (e) {
-      // try next
-    }
+    } catch (e) {}
   }
 
-  // Fallback: Piped API
+  // Fallback Strategy: Piped API
   const pipedEndpoints = [
     'https://pipedapi.kavin.rocks',
     'https://api.piped.privacydev.net',
@@ -101,40 +206,10 @@ async function resolveYouTubeAudio(videoUrl) {
           };
         }
       }
-    } catch (e) {
-      // try next
-    }
+    } catch (e) {}
   }
 
-  // Fallback: Invidious API
-  const invidiousEndpoints = [
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://vid.puffyan.us',
-  ];
-
-  for (const base of invidiousEndpoints) {
-    try {
-      const res = await fetch(`${base}/api/v1/videos/${videoId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.adaptiveFormats) {
-          const audioFormats = data.adaptiveFormats.filter(f => f.type && f.type.startsWith('audio/'));
-          if (audioFormats.length > 0) {
-            return {
-              title: data.title || `YouTube Audio - ${videoId}`,
-              streamUrl: audioFormats[0].url,
-              videoId,
-            };
-          }
-        }
-      }
-    } catch (e) {
-      // try next
-    }
-  }
-
-  throw new Error('Unable to resolve YouTube audio stream. Please check video accessibility.');
+  throw new Error(lastError?.message || 'Unable to resolve YouTube audio stream. Please check video accessibility.');
 }
 
 const server = http.createServer(async (req, res) => {
@@ -192,61 +267,35 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const parsed = new URL(streamUrl);
-      const client = parsed.protocol === 'https:' ? https : http;
-
-      const proxyReq = client.get(streamUrl, {
+      const response = await fetch(streamUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           ...(req.headers.range ? { Range: req.headers.range } : {}),
-        }
-      }, (proxyRes) => {
-        // Follow redirect if needed
-        if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
-          const redirectUrl = new URL(proxyRes.headers.location, streamUrl).toString();
-          const redirectClient = redirectUrl.startsWith('https') ? https : http;
-          const redirectReq = redirectClient.get(
-            redirectUrl,
-            {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                ...(req.headers.range ? { Range: req.headers.range } : {}),
-              }
-            },
-            (redirectRes) => {
-              res.writeHead(redirectRes.statusCode, {
-                'Content-Type': redirectRes.headers['content-type'] || 'audio/mpeg',
-                'Access-Control-Allow-Origin': '*',
-                'Accept-Ranges': 'bytes',
-                ...(redirectRes.headers['content-length'] ? { 'Content-Length': redirectRes.headers['content-length'] } : {}),
-              });
-              redirectRes.pipe(res);
-            }
-          );
-          redirectReq.on('error', () => {
-            res.writeHead(502, { 'Content-Type': 'text/plain' });
-            res.end('Proxy redirect failed');
-          });
-          return;
-        }
-
-        res.writeHead(proxyRes.statusCode, {
-          'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
-          'Access-Control-Allow-Origin': '*',
-          'Accept-Ranges': 'bytes',
-          ...(proxyRes.headers['content-length'] ? { 'Content-Length': proxyRes.headers['content-length'] } : {}),
-        });
-        proxyRes.pipe(res);
+        },
       });
 
-      proxyReq.on('error', (err) => {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Proxy streaming error: ' + err.message);
+      if (!response.ok && response.status >= 400) {
+        res.writeHead(response.status, { 'Content-Type': 'text/plain' });
+        return res.end(`Upstream audio request failed: ${response.status}`);
+      }
+
+      res.writeHead(response.status, {
+        'Content-Type': response.headers.get('content-type') || 'audio/mpeg',
+        'Access-Control-Allow-Origin': '*',
+        'Accept-Ranges': 'bytes',
+        ...(response.headers.get('content-length') ? { 'Content-Length': response.headers.get('content-length') } : {}),
       });
+
+      if (response.body) {
+        const stream = Readable.fromWeb(response.body);
+        stream.pipe(res);
+      } else {
+        res.end();
+      }
       return;
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
-      return res.end('Invalid stream URL');
+      return res.end('Proxy streaming error: ' + err.message);
     }
   }
 
