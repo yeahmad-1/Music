@@ -1,5 +1,5 @@
-import React, { useState, useLayoutEffect } from 'react';
-import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform } from 'react-native';
+import React, { useState, useLayoutEffect, useRef } from 'react';
+import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform, PanResponder } from 'react-native';
 import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
 import { useAudio, Song } from '../context/AudioContext';
@@ -31,6 +31,23 @@ const LibraryScreen = ({ navigation }: any) => {
   const [menuVisible, setMenuVisible] = useState(false);
   const [isReorderMode, setIsReorderMode] = useState(false);
   const [isSortDialogVisible, setIsSortDialogVisible] = useState(false);
+
+  // Drag-and-drop / sliding state
+  const [dragState, setDragState] = useState<{
+    active: boolean;
+    fromIndex: number;
+    toIndex: number;
+    songName: string;
+  }>({
+    active: false,
+    fromIndex: -1,
+    toIndex: -1,
+    songName: '',
+  });
+  const [movePositionModalSong, setMovePositionModalSong] = useState<Song | null>(null);
+  const [customPositionInput, setCustomPositionInput] = useState('');
+  const dragStartIndexRef = useRef<number>(-1);
+  const currentDragTargetRef = useRef<number>(-1);
 
   const [isPlaylistModalVisible, setIsPlaylistModalVisible] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
@@ -265,6 +282,8 @@ const LibraryScreen = ({ navigation }: any) => {
   };
 
   const handleMoveSong = async (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || fromIndex >= currentDisplayList.length) return;
     if (toIndex < 0 || toIndex >= currentDisplayList.length) return;
     const copy = [...currentDisplayList];
     const [moved] = copy.splice(fromIndex, 1);
@@ -275,6 +294,130 @@ const LibraryScreen = ({ navigation }: any) => {
     } else {
       await updatePlaylistOrder(copy);
     }
+  };
+
+  const handleDragHandlePointerDown = (index: number, song: Song, e: any) => {
+    if (Platform.OS !== 'web') return;
+    e.preventDefault?.();
+    e.stopPropagation?.();
+
+    dragStartIndexRef.current = index;
+    currentDragTargetRef.current = index;
+    setDragState({
+      active: true,
+      fromIndex: index,
+      toIndex: index,
+      songName: song.name,
+    });
+
+    const onPointerMove = (evt: any) => {
+      evt.preventDefault?.();
+      const clientX = evt.clientX ?? evt.touches?.[0]?.clientX;
+      const clientY = evt.clientY ?? evt.touches?.[0]?.clientY;
+      if (clientX == null || clientY == null) return;
+
+      const elem = document.elementFromPoint(clientX, clientY);
+      const row = elem?.closest?.('[data-index]');
+      if (row) {
+        const idxAttr = row.getAttribute('data-index');
+        if (idxAttr !== null) {
+          const targetIdx = parseInt(idxAttr, 10);
+          if (!isNaN(targetIdx) && targetIdx >= 0 && targetIdx < currentDisplayList.length) {
+            currentDragTargetRef.current = targetIdx;
+            setDragState(prev => (prev.active && prev.toIndex !== targetIdx ? { ...prev, toIndex: targetIdx } : prev));
+          }
+        }
+      } else {
+        const container = document.querySelector('[data-reorder-container]');
+        if (container) {
+          const rect = container.getBoundingClientRect();
+          if (clientY < rect.top) {
+            currentDragTargetRef.current = 0;
+            setDragState(prev => (prev.active && prev.toIndex !== 0 ? { ...prev, toIndex: 0 } : prev));
+          } else if (clientY > rect.bottom) {
+            const lastIdx = currentDisplayList.length - 1;
+            currentDragTargetRef.current = lastIdx;
+            setDragState(prev => (prev.active && prev.toIndex !== lastIdx ? { ...prev, toIndex: lastIdx } : prev));
+          }
+        }
+      }
+
+      // Auto-scroll when dragging near viewport edges
+      const edgeMargin = 80;
+      if (clientY < edgeMargin) {
+        window.scrollBy({ top: -14, behavior: 'auto' });
+      } else if (clientY > window.innerHeight - edgeMargin) {
+        window.scrollBy({ top: 14, behavior: 'auto' });
+      }
+    };
+
+    const onPointerUp = async () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      window.removeEventListener('mousemove', onPointerMove);
+      window.removeEventListener('mouseup', onPointerUp);
+      window.removeEventListener('touchmove', onPointerMove);
+      window.removeEventListener('touchend', onPointerUp);
+
+      const from = dragStartIndexRef.current;
+      const to = currentDragTargetRef.current;
+      dragStartIndexRef.current = -1;
+      currentDragTargetRef.current = -1;
+
+      setDragState({ active: false, fromIndex: -1, toIndex: -1, songName: '' });
+
+      if (from >= 0 && to >= 0 && from !== to && from < currentDisplayList.length && to < currentDisplayList.length) {
+        await handleMoveSong(from, to);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    window.addEventListener('mousemove', onPointerMove);
+    window.addEventListener('mouseup', onPointerUp);
+    window.addEventListener('touchmove', onPointerMove, { passive: false });
+    window.addEventListener('touchend', onPointerUp);
+  };
+
+  const createNativePanResponder = (index: number, song: Song) => {
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => Platform.OS !== 'web',
+      onMoveShouldSetPanResponder: () => Platform.OS !== 'web',
+      onPanResponderGrant: () => {
+        dragStartIndexRef.current = index;
+        currentDragTargetRef.current = index;
+        setDragState({
+          active: true,
+          fromIndex: index,
+          toIndex: index,
+          songName: song.name,
+        });
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const estimatedRowHeight = 62;
+        const steps = Math.round(gestureState.dy / estimatedRowHeight);
+        const target = Math.max(0, Math.min(currentDisplayList.length - 1, index + steps));
+        currentDragTargetRef.current = target;
+        setDragState(prev => (prev.active && prev.toIndex !== target ? { ...prev, toIndex: target } : prev));
+      },
+      onPanResponderRelease: async () => {
+        const from = dragStartIndexRef.current;
+        const to = currentDragTargetRef.current;
+        dragStartIndexRef.current = -1;
+        currentDragTargetRef.current = -1;
+        setDragState({ active: false, fromIndex: -1, toIndex: -1, songName: '' });
+        if (from >= 0 && to >= 0 && from !== to && from < currentDisplayList.length && to < currentDisplayList.length) {
+          await handleMoveSong(from, to);
+        }
+      },
+      onPanResponderTerminate: () => {
+        dragStartIndexRef.current = -1;
+        currentDragTargetRef.current = -1;
+        setDragState({ active: false, fromIndex: -1, toIndex: -1, songName: '' });
+      },
+    });
   };
 
   const handleMoveToTop = async (songId: string) => {
@@ -341,22 +484,75 @@ const LibraryScreen = ({ navigation }: any) => {
     const selectionMode = selectedIds.length > 0;
 
     if (isReorderMode) {
+      const isThisItemDragging = dragState.active && dragState.fromIndex === index;
+      const isThisItemTarget = dragState.active && dragState.toIndex === index && dragState.fromIndex !== index;
+
+      const dragHandleWebProps = Platform.OS === 'web'
+        ? {
+            onPointerDown: (e: any) => handleDragHandlePointerDown(index, item, e),
+            style: {
+              cursor: dragState.active ? 'grabbing' : 'grab',
+              touchAction: 'none',
+              userSelect: 'none',
+            } as any,
+          }
+        : {};
+
+      const panResponder = Platform.OS !== 'web' ? createNativePanResponder(index, item) : null;
+      const panHandlers = panResponder ? panResponder.panHandlers : {};
+
       return (
         <View
+          {...({ dataSet: { index: String(index) } } as any)}
           style={[
             styles.reorderItem,
             {
-              backgroundColor: isCurrentlyPlaying
+              backgroundColor: isThisItemDragging
+                ? (theme.dark ? '#1E293B' : '#DBEAFE')
+                : isCurrentlyPlaying
                 ? theme.dark
                   ? '#1E293B'
                   : '#E0E7FF'
                 : theme.colors.surface,
-              borderColor: theme.colors.outlineVariant,
+              borderColor: isThisItemTarget
+                ? theme.colors.primary
+                : isThisItemDragging
+                ? theme.colors.primary
+                : theme.colors.outlineVariant,
+              borderWidth: isThisItemTarget || isThisItemDragging ? 2 : 1,
+              opacity: isThisItemDragging ? 0.75 : 1,
+              position: 'relative',
+              ...(Platform.OS === 'web' && isThisItemDragging ? { pointerEvents: 'none' as any } : {}),
             },
           ]}
         >
-          {/* Position index badge */}
-          <View
+          {/* Target Drop Indicator Line */}
+          {isThisItemTarget && (
+            <View
+              style={[
+                styles.dropIndicatorBar,
+                {
+                  backgroundColor: theme.colors.primary,
+                  top: dragState.fromIndex > index ? -12 : undefined,
+                  bottom: dragState.fromIndex < index ? -12 : undefined,
+                },
+              ]}
+            >
+              <Text variant="labelSmall" style={{ color: '#FFFFFF', fontWeight: 'bold' }}>
+                {dragState.fromIndex > index
+                  ? `▲ Drop here at Position #${index + 1}`
+                  : `▼ Drop here at Position #${index + 1}`}
+              </Text>
+            </View>
+          )}
+
+          {/* Position Index Badge - Tapping opens Jump to Position modal */}
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onPress={() => {
+              setMovePositionModalSong(item);
+              setCustomPositionInput(String(index + 1));
+            }}
             style={[
               styles.indexBadge,
               { backgroundColor: theme.colors.primaryContainer },
@@ -371,10 +567,17 @@ const LibraryScreen = ({ navigation }: any) => {
             >
               #{index + 1}
             </Text>
-          </View>
+          </TouchableOpacity>
 
-          {/* Title */}
-          <View style={{ flex: 1, marginHorizontal: 12 }}>
+          {/* Title & Hint */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => {
+              setMovePositionModalSong(item);
+              setCustomPositionInput(String(index + 1));
+            }}
+            style={{ flex: 1, marginHorizontal: 10 }}
+          >
             <Text
               variant="bodyMedium"
               numberOfLines={1}
@@ -385,20 +588,24 @@ const LibraryScreen = ({ navigation }: any) => {
             >
               {item.name}
             </Text>
-          </View>
+            <Text variant="labelSmall" style={{ color: theme.colors.outline }}>
+              Tap to jump • Slide ☰ to drag
+            </Text>
+          </TouchableOpacity>
 
-          {/* Up & Down Reorder Buttons */}
+          {/* Precision Nudge Up & Down Buttons */}
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <IconButton
               icon="chevron-up"
-              size={24}
+              size={22}
               disabled={index === 0}
               iconColor={index === 0 ? theme.colors.outline : theme.colors.primary}
               onPress={() => handleMoveSong(index, index - 1)}
+              style={{ margin: 0 }}
             />
             <IconButton
               icon="chevron-down"
-              size={24}
+              size={22}
               disabled={index === currentDisplayList.length - 1}
               iconColor={
                 index === currentDisplayList.length - 1
@@ -406,6 +613,21 @@ const LibraryScreen = ({ navigation }: any) => {
                   : theme.colors.primary
               }
               onPress={() => handleMoveSong(index, index + 1)}
+              style={{ margin: 0 }}
+            />
+          </View>
+
+          {/* Drag & Slide Handle */}
+          <View
+            {...dragHandleWebProps}
+            {...panHandlers}
+            style={styles.dragHandleContainer}
+          >
+            <IconButton
+              icon="drag-horizontal-variant"
+              size={26}
+              iconColor={isThisItemDragging ? theme.colors.primary : theme.colors.onSurfaceVariant}
+              style={{ margin: 0 }}
             />
           </View>
         </View>
@@ -530,28 +752,59 @@ const LibraryScreen = ({ navigation }: any) => {
         <View
           style={[
             styles.reorderBanner,
-            { backgroundColor: theme.colors.secondaryContainer },
+            {
+              backgroundColor: dragState.active
+                ? theme.colors.primaryContainer
+                : theme.colors.secondaryContainer,
+            },
           ]}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-            <IconButton icon="swap-vertical" iconColor={theme.colors.secondary} size={20} />
-            <Text
-              variant="labelMedium"
-              style={{
-                color: theme.colors.onSecondaryContainer,
-                fontWeight: 'bold',
-                flex: 1,
-              }}
-            >
-              Arrange Mode • Tap ▲ or ▼ to move songs
-            </Text>
+            <IconButton
+              icon={dragState.active ? 'swap-vertical-bold' : 'swap-vertical'}
+              iconColor={dragState.active ? theme.colors.primary : theme.colors.secondary}
+              size={22}
+            />
+            <View style={{ flex: 1 }}>
+              <Text
+                variant="labelMedium"
+                numberOfLines={1}
+                style={{
+                  color: dragState.active
+                    ? theme.colors.onPrimaryContainer
+                    : theme.colors.onSecondaryContainer,
+                  fontWeight: 'bold',
+                }}
+              >
+                {dragState.active
+                  ? `Sliding: "${dragState.songName}"`
+                  : 'Arrange Mode • Slide ☰ to drag, or tap # to jump'}
+              </Text>
+              {dragState.active && (
+                <Text
+                  variant="labelSmall"
+                  style={{
+                    color: theme.colors.primary,
+                    fontWeight: 'bold',
+                  }}
+                >
+                  Target: Slot #{dragState.toIndex + 1} of {currentDisplayList.length}
+                </Text>
+              )}
+            </View>
           </View>
           <Button
-            mode="contained-tonal"
+            mode={dragState.active ? 'contained' : 'contained-tonal'}
             compact
-            onPress={() => setIsReorderMode(false)}
+            onPress={() => {
+              if (dragState.active) {
+                setDragState({ active: false, fromIndex: -1, toIndex: -1, songName: '' });
+              } else {
+                setIsReorderMode(false);
+              }
+            }}
           >
-            Done
+            {dragState.active ? 'Cancel' : 'Done'}
           </Button>
         </View>
       )}
@@ -589,6 +842,7 @@ const LibraryScreen = ({ navigation }: any) => {
           maxToRenderPerBatch={50}
           showsVerticalScrollIndicator={true}
           keyboardShouldPersistTaps="handled"
+          {...(isReorderMode ? ({ dataSet: { 'reorder-container': 'true' } } as any) : {})}
           ItemSeparatorComponent={() => (
             <Divider style={{ backgroundColor: 'transparent', height: 4 }} />
           )}
@@ -724,6 +978,31 @@ const LibraryScreen = ({ navigation }: any) => {
               />
             )}
             <List.Item
+              title="Move to Position..."
+              left={props => (
+                <List.Icon {...props} icon="format-list-numbered" />
+              )}
+              onPress={() => {
+                const song = selectedSongForAction;
+                setSelectedSongForAction(null);
+                if (song) {
+                  setMovePositionModalSong(song);
+                  const idx = currentDisplayList.findIndex(s => s.id === song.id);
+                  setCustomPositionInput(idx >= 0 ? String(idx + 1) : '1');
+                }
+              }}
+            />
+            <List.Item
+              title="Slide & Arrange Songs"
+              left={props => (
+                <List.Icon {...props} icon="swap-vertical" />
+              )}
+              onPress={() => {
+                setSelectedSongForAction(null);
+                setIsReorderMode(true);
+              }}
+            />
+            <List.Item
               title="Move to Top"
               left={props => (
                 <List.Icon {...props} icon="arrow-up-bold-box-outline" />
@@ -762,6 +1041,140 @@ const LibraryScreen = ({ navigation }: any) => {
           </Dialog.Content>
           <Dialog.Actions>
             <Button onPress={() => setSelectedSongForAction(null)}>Close</Button>
+          </Dialog.Actions>
+        </Dialog>
+
+        {/* Move to Position Dialog */}
+        <Dialog
+          visible={!!movePositionModalSong}
+          onDismiss={() => {
+            setMovePositionModalSong(null);
+            setCustomPositionInput('');
+          }}
+          style={{ backgroundColor: theme.colors.surface }}
+        >
+          <Dialog.Title>Move Song</Dialog.Title>
+          <Dialog.Content>
+            <Text
+              variant="titleSmall"
+              numberOfLines={1}
+              style={{ fontWeight: 'bold', marginBottom: 4 }}
+            >
+              {movePositionModalSong?.name}
+            </Text>
+            <Text
+              variant="bodySmall"
+              style={{ color: theme.colors.outline, marginBottom: 16 }}
+            >
+              Current: Position #{currentDisplayList.findIndex(s => s.id === movePositionModalSong?.id) + 1} of {currentDisplayList.length}
+            </Text>
+
+            <Text variant="labelMedium" style={{ marginBottom: 8, fontWeight: 'bold' }}>
+              Quick Jump:
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 16 }}>
+              <Button
+                mode="contained-tonal"
+                icon="arrow-collapse-up"
+                compact
+                style={{ flex: 1 }}
+                onPress={async () => {
+                  if (movePositionModalSong) {
+                    const curIdx = currentDisplayList.findIndex(s => s.id === movePositionModalSong.id);
+                    if (curIdx >= 0) await handleMoveSong(curIdx, 0);
+                  }
+                  setMovePositionModalSong(null);
+                  setCustomPositionInput('');
+                }}
+              >
+                Top (#1)
+              </Button>
+              <Button
+                mode="contained-tonal"
+                icon="arrow-collapse"
+                compact
+                style={{ flex: 1 }}
+                onPress={async () => {
+                  if (movePositionModalSong) {
+                    const curIdx = currentDisplayList.findIndex(s => s.id === movePositionModalSong.id);
+                    const midIdx = Math.floor(currentDisplayList.length / 2);
+                    if (curIdx >= 0) await handleMoveSong(curIdx, midIdx);
+                  }
+                  setMovePositionModalSong(null);
+                  setCustomPositionInput('');
+                }}
+              >
+                Middle (#{Math.floor(currentDisplayList.length / 2) + 1})
+              </Button>
+              <Button
+                mode="contained-tonal"
+                icon="arrow-collapse-down"
+                compact
+                style={{ flex: 1 }}
+                onPress={async () => {
+                  if (movePositionModalSong) {
+                    const curIdx = currentDisplayList.findIndex(s => s.id === movePositionModalSong.id);
+                    if (curIdx >= 0) await handleMoveSong(curIdx, currentDisplayList.length - 1);
+                  }
+                  setMovePositionModalSong(null);
+                  setCustomPositionInput('');
+                }}
+              >
+                Last (#{currentDisplayList.length})
+              </Button>
+            </View>
+
+            <Text variant="labelMedium" style={{ marginBottom: 8, fontWeight: 'bold' }}>
+              Or Jump to Position Number:
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <TextInput
+                mode="outlined"
+                keyboardType="number-pad"
+                placeholder={`1 - ${currentDisplayList.length}`}
+                value={customPositionInput}
+                onChangeText={setCustomPositionInput}
+                onSubmitEditing={async () => {
+                  const targetNum = parseInt(customPositionInput.trim(), 10);
+                  if (!isNaN(targetNum) && targetNum >= 1 && targetNum <= currentDisplayList.length && movePositionModalSong) {
+                    const curIdx = currentDisplayList.findIndex(s => s.id === movePositionModalSong.id);
+                    if (curIdx >= 0) {
+                      await handleMoveSong(curIdx, targetNum - 1);
+                    }
+                  }
+                  setMovePositionModalSong(null);
+                  setCustomPositionInput('');
+                }}
+                style={{ flex: 1, backgroundColor: theme.colors.surface }}
+                dense
+              />
+              <Button
+                mode="contained"
+                onPress={async () => {
+                  const targetNum = parseInt(customPositionInput.trim(), 10);
+                  if (!isNaN(targetNum) && targetNum >= 1 && targetNum <= currentDisplayList.length && movePositionModalSong) {
+                    const curIdx = currentDisplayList.findIndex(s => s.id === movePositionModalSong.id);
+                    if (curIdx >= 0) {
+                      await handleMoveSong(curIdx, targetNum - 1);
+                    }
+                  }
+                  setMovePositionModalSong(null);
+                  setCustomPositionInput('');
+                }}
+              >
+                Move
+              </Button>
+            </View>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button
+              onPress={() => {
+                setMovePositionModalSong(null);
+                setCustomPositionInput('');
+              }}
+            >
+              Cancel
+            </Button>
           </Dialog.Actions>
         </Dialog>
 
@@ -961,6 +1374,24 @@ const styles = StyleSheet.create({
     minWidth: 32,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  dropIndicatorBar: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    height: 24,
+    borderRadius: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+    elevation: 8,
+  },
+  dragHandleContainer: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
   listItem: { paddingVertical: 4 },
