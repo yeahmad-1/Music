@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking } from 'react-native';
-import { IconButton, Text, ProgressBar, Surface, useTheme } from 'react-native-paper';
+import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking, PanResponder } from 'react-native';
+import { IconButton, Text, Surface, useTheme } from 'react-native-paper';
 import { useAudio } from '../context/AudioContext';
 import { adService, WheelAdConfig } from '../services/AdService';
 
@@ -10,7 +10,8 @@ const PlayerScreen = () => {
   const { 
     currentSong, isPlaying, pauseSong, resumeSong,
     nextSong, previousSong, playbackStatus, toggleFavorite,
-    isShuffle, toggleShuffle, repeatMode, toggleRepeat
+    isShuffle, toggleShuffle, repeatMode, toggleRepeat,
+    seek
   } = useAudio();
 
   const theme = useTheme();
@@ -50,13 +51,69 @@ const PlayerScreen = () => {
     outputRange: ['0deg', '360deg'],
   });
 
-  const getProgress = () => {
-    if (playbackStatus && playbackStatus.durationMillis && playbackStatus.durationMillis > 0) {
-      const progress = (playbackStatus.positionMillis || 0) / playbackStatus.durationMillis;
-      return Math.min(Math.max(progress, 0), 1);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubPositionMillis, setScrubPositionMillis] = useState<number | null>(null);
+  const sliderWidthRef = useRef(0);
+  const sliderPageXRef = useRef(0);
+  const sliderViewRef = useRef<View>(null);
+
+  const durationMillis = playbackStatus?.durationMillis || 0;
+  const currentPositionMillis = isScrubbing && scrubPositionMillis !== null
+    ? scrubPositionMillis
+    : (playbackStatus?.positionMillis || 0);
+
+  const progressRatio = durationMillis > 0
+    ? Math.min(Math.max(currentPositionMillis / durationMillis, 0), 1)
+    : 0;
+
+  const handleSeekFromEvent = (evt: any, isFinal: boolean) => {
+    const width = sliderWidthRef.current;
+    if (width <= 0 || durationMillis <= 0) return;
+
+    let touchX = evt.nativeEvent.locationX;
+    if (evt.nativeEvent.pageX !== undefined && sliderPageXRef.current > 0) {
+      touchX = evt.nativeEvent.pageX - sliderPageXRef.current;
     }
-    return 0;
+
+    const clampedX = Math.max(0, Math.min(touchX, width));
+    const ratio = clampedX / width;
+    const targetMillis = Math.round(ratio * durationMillis);
+
+    if (isFinal) {
+      setIsScrubbing(false);
+      setScrubPositionMillis(null);
+      seek(targetMillis);
+    } else {
+      setIsScrubbing(true);
+      setScrubPositionMillis(targetMillis);
+    }
   };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt) => {
+        if (sliderViewRef.current) {
+          sliderViewRef.current.measure((x, y, width, height, pageX) => {
+            if (pageX) sliderPageXRef.current = pageX;
+            if (width) sliderWidthRef.current = width;
+          });
+        }
+        handleSeekFromEvent(evt, false);
+      },
+      onPanResponderMove: (evt) => {
+        handleSeekFromEvent(evt, false);
+      },
+      onPanResponderRelease: (evt) => {
+        handleSeekFromEvent(evt, true);
+      },
+      onPanResponderTerminate: () => {
+        setIsScrubbing(false);
+        setScrubPositionMillis(null);
+      },
+    })
+  ).current;
 
   const formatTime = (millis: number) => {
     if (!millis || millis < 0) return "0:00";
@@ -140,10 +197,65 @@ const PlayerScreen = () => {
       </View>
 
       <View style={styles.progressContainer}>
-        <ProgressBar progress={getProgress()} color={theme.colors.primary} style={styles.progressBar} />        
+        <View
+          ref={sliderViewRef}
+          style={styles.sliderTouchArea}
+          onLayout={(e) => {
+            const w = e.nativeEvent.layout.width;
+            sliderWidthRef.current = w;
+            if (sliderViewRef.current) {
+              sliderViewRef.current.measure((x, y, width, height, pageX) => {
+                if (pageX) sliderPageXRef.current = pageX;
+                if (width) sliderWidthRef.current = width;
+              });
+            }
+          }}
+          {...panResponder.panHandlers}
+        >
+          {/* Background Track */}
+          <View style={[styles.sliderTrack, { backgroundColor: theme.dark ? '#333A4D' : '#E0E0E0' }]}>
+            {/* Active Progress Fill */}
+            <View
+              style={[
+                styles.sliderFill,
+                {
+                  width: `${progressRatio * 100}%`,
+                  backgroundColor: theme.colors.primary,
+                },
+              ]}
+            />
+          </View>
+
+          {/* Draggable Thumb */}
+          <View
+            style={[
+              styles.sliderThumb,
+              {
+                left: `${progressRatio * 100}%`,
+                backgroundColor: theme.colors.primary,
+                borderColor: '#FFFFFF',
+                transform: [
+                  { translateX: -10 },
+                  { scale: isScrubbing ? 1.25 : 1 }
+                ],
+              },
+            ]}
+          />
+        </View>
+
         <View style={styles.timeContainer}>
-          <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>{formatTime(playbackStatus?.positionMillis || 0)}</Text>
-          <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>{formatTime(playbackStatus?.durationMillis || 0)}</Text>
+          <Text
+            variant="labelSmall"
+            style={{
+              color: isScrubbing ? theme.colors.primary : theme.colors.onSurfaceVariant,
+              fontWeight: isScrubbing ? 'bold' : 'normal',
+            }}
+          >
+            {formatTime(currentPositionMillis)}
+          </Text>
+          <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant }}>
+            {formatTime(durationMillis)}
+          </Text>
         </View>
       </View>
 
@@ -221,9 +333,33 @@ const styles = StyleSheet.create({
     width: '100%',
     marginBottom: 40,
   },
-  progressBar: {
+  sliderTouchArea: {
+    height: 36,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  sliderTrack: {
     height: 6,
     borderRadius: 3,
+    width: '100%',
+    overflow: 'hidden',
+  },
+  sliderFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  sliderThumb: {
+    position: 'absolute',
+    top: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
   },
   timeContainer: {
     flexDirection: 'row',
