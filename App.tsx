@@ -10,6 +10,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import { useColorScheme } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { keepAliveService } from './src/services/KeepAliveService';
 
 const Stack = createStackNavigator();
 
@@ -58,6 +59,7 @@ export default function App() {
 
   useEffect(() => {
     loadTheme();
+    keepAliveService.init();
   }, []);
 
   const loadTheme = async () => {

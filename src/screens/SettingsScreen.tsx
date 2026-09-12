@@ -2,6 +2,7 @@
 import { View, StyleSheet, ScrollView, Alert } from 'react-native';
 import { Text, Switch, Divider, useTheme, Button, TextInput, Dialog, Portal, IconButton, Card } from 'react-native-paper';
 import { adService, WheelAdConfig, defaultAdConfig } from '../services/AdService';
+import { keepAliveService, KeepAliveConfig } from '../services/KeepAliveService';
 
 const SettingsScreen = ({ route }: any) => {
   const theme = useTheme();
@@ -20,8 +21,18 @@ const SettingsScreen = ({ route }: any) => {
   const [adConfig, setAdConfig] = useState<WheelAdConfig>(defaultAdConfig);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
 
+  // Server Keep-Alive States
+  const [keepAliveConfig, setKeepAliveConfig] = useState<KeepAliveConfig>(keepAliveService.getConfig());
+  const [isPingingNow, setIsPingingNow] = useState(false);
+  const [pingFeedback, setPingFeedback] = useState<string | null>(null);
+
   useEffect(() => {
     loadAdSettings();
+    setKeepAliveConfig(keepAliveService.getConfig());
+    const unsubscribe = keepAliveService.subscribe((cfg) => {
+      setKeepAliveConfig({ ...cfg });
+    });
+    return () => unsubscribe();
   }, []);
 
   const loadAdSettings = async () => {
@@ -58,6 +69,30 @@ const SettingsScreen = ({ route }: any) => {
     setTimeout(() => setSaveSuccessMsg(null), 3000);
   };
 
+  const handleManualPing = async () => {
+    if (!keepAliveConfig.serverUrl.trim()) return;
+    setIsPingingNow(true);
+    setPingFeedback(null);
+    try {
+      const result = await keepAliveService.sendPing();
+      setPingFeedback(result.message);
+    } catch (e: any) {
+      setPingFeedback(`Error: ${e?.message || 'Failed'}`);
+    } finally {
+      setIsPingingNow(false);
+    }
+  };
+
+  const handleSaveKeepAlive = async () => {
+    const updated = await keepAliveService.updateConfig({
+      serverUrl: keepAliveConfig.serverUrl.trim(),
+      enabled: keepAliveConfig.enabled,
+    });
+    setKeepAliveConfig(updated);
+    setPingFeedback('Keep-Alive configuration saved! Server will be pinged every 5 minutes.');
+    setTimeout(() => setPingFeedback(null), 4000);
+  };
+
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       <ScrollView style={{ flex: 1 }}>
@@ -70,6 +105,77 @@ const SettingsScreen = ({ route }: any) => {
             <Text style={{ color: theme.colors.onSurface, fontSize: 16 }}>Dark Mode</Text>
             <Switch value={isDarkMode} onValueChange={toggleTheme} color={theme.colors.primary} />
           </View>
+        </View>
+
+        <Divider />
+
+        {/* Server Keep-Alive Section */}
+        <View style={styles.section}>
+          <Text variant="titleMedium" style={[styles.sectionTitle, { color: theme.colors.primary, letterSpacing: 1.2, textTransform: 'uppercase', fontSize: 14 }]}>
+            Server Keep-Alive Heartbeat
+          </Text>
+          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 12 }}>
+            Automatically sends a lightweight request to your backend every 5 minutes to prevent free-tier cloud servers (Render, Heroku, Railway, etc.) from sleeping.
+          </Text>
+
+          <View style={[styles.row, { paddingVertical: 4 }]}>
+            <Text style={{ color: theme.colors.onSurface, fontSize: 15, fontWeight: 'bold' }}>5-Minute Heartbeat Ping</Text>
+            <Switch
+              value={keepAliveConfig.enabled}
+              onValueChange={async (val) => {
+                const updated = await keepAliveService.updateConfig({ enabled: val });
+                setKeepAliveConfig(updated);
+              }}
+              color={theme.colors.primary}
+            />
+          </View>
+
+          <TextInput
+            label="Server URL to Ping"
+            placeholder="https://my-backend.onrender.com/health"
+            value={keepAliveConfig.serverUrl}
+            onChangeText={(text) => setKeepAliveConfig({ ...keepAliveConfig, serverUrl: text })}
+            mode="outlined"
+            style={[styles.input, { marginTop: 8 }]}
+            autoCapitalize="none"
+            autoCorrect={false}
+            activeOutlineColor={theme.colors.primary}
+          />
+
+          {keepAliveConfig.lastPingTime && (
+            <Text variant="labelSmall" style={{ color: theme.colors.onSurfaceVariant, marginTop: 4, marginBottom: 8 }}>
+              Last Ping: {new Date(keepAliveConfig.lastPingTime).toLocaleTimeString()} ({keepAliveConfig.lastPingStatus || 'Pending'})
+            </Text>
+          )}
+
+          <View style={{ flexDirection: 'row', gap: 10, marginTop: 6 }}>
+            <Button
+              mode="outlined"
+              icon="radio-tower"
+              onPress={handleManualPing}
+              loading={isPingingNow}
+              disabled={isPingingNow || !keepAliveConfig.serverUrl.trim()}
+              textColor={theme.colors.primary}
+              style={{ flex: 1 }}
+            >
+              Ping Now
+            </Button>
+            <Button
+              mode="contained"
+              icon="content-save"
+              onPress={handleSaveKeepAlive}
+              buttonColor={theme.colors.primary}
+              style={{ flex: 1 }}
+            >
+              Save URL
+            </Button>
+          </View>
+
+          {pingFeedback && (
+            <Text variant="bodySmall" style={{ color: pingFeedback.startsWith('Failed') ? '#D32F2F' : '#4CAF50', marginTop: 8, fontWeight: 'bold' }}>
+              {pingFeedback}
+            </Text>
+          )}
         </View>
 
         <Divider />
