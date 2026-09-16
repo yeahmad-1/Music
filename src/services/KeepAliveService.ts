@@ -8,12 +8,22 @@ export interface KeepAliveConfig {
   lastPingStatus?: string;
 }
 
+function getDefaultServerUrl(): string {
+  if (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin.startsWith('http')) {
+    return `${window.location.origin}/ping`;
+  }
+  return 'https://music-hlq1.onrender.com/ping';
+}
+
+function getDefaultConfig(): KeepAliveConfig {
+  return {
+    enabled: true,
+    serverUrl: getDefaultServerUrl(),
+    intervalMinutes: 4,
+  };
+}
+
 const KEEP_ALIVE_KEY = 'keep_alive_config';
-const DEFAULT_CONFIG: KeepAliveConfig = {
-  enabled: false,
-  serverUrl: '',
-  intervalMinutes: 4,
-};
 
 /**
  * Service that sends an HTTP keep-alive heartbeat ping to a server
@@ -22,19 +32,29 @@ const DEFAULT_CONFIG: KeepAliveConfig = {
  */
 class KeepAliveService {
   private timer: any = null;
-  private config: KeepAliveConfig = { ...DEFAULT_CONFIG };
+  private config: KeepAliveConfig = getDefaultConfig();
   private listeners: Array<(config: KeepAliveConfig) => void> = [];
 
   async init(): Promise<KeepAliveConfig> {
     try {
       const stored = await AsyncStorage.getItem(KEEP_ALIVE_KEY);
       if (stored) {
-        this.config = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+        const parsed = JSON.parse(stored);
+        this.config = {
+          ...getDefaultConfig(),
+          ...parsed,
+          serverUrl: parsed.serverUrl?.trim() || getDefaultServerUrl(),
+          enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : true,
+        };
+      } else {
+        this.config = getDefaultConfig();
+        await AsyncStorage.setItem(KEEP_ALIVE_KEY, JSON.stringify(this.config)).catch(() => {});
       }
     } catch {
-      this.config = { ...DEFAULT_CONFIG };
+      this.config = getDefaultConfig();
     }
     this.restartTimer();
+    this.notify();
     return this.config;
   }
 
@@ -44,6 +64,9 @@ class KeepAliveService {
 
   async updateConfig(partial: Partial<KeepAliveConfig>): Promise<KeepAliveConfig> {
     this.config = { ...this.config, ...partial };
+    if (!this.config.serverUrl || !this.config.serverUrl.trim()) {
+      this.config.serverUrl = getDefaultServerUrl();
+    }
     try {
       await AsyncStorage.setItem(KEEP_ALIVE_KEY, JSON.stringify(this.config));
     } catch (e) {
@@ -71,7 +94,7 @@ class KeepAliveService {
       this.timer = null;
     }
 
-    if (this.config.enabled && this.config.serverUrl && this.config.serverUrl.trim().startsWith('http')) {
+    if (this.config.enabled) {
       const intervalMs = (this.config.intervalMinutes || 4) * 60 * 1000;
       // Send an initial ping if none was sent recently
       const shouldSendInitial = !this.config.lastPingTime || (Date.now() - this.config.lastPingTime > intervalMs);
@@ -86,9 +109,10 @@ class KeepAliveService {
   }
 
   async sendPing(): Promise<{ success: boolean; message: string; statusCode?: number }> {
-    const url = this.config.serverUrl?.trim();
-    if (!url || !url.startsWith('http')) {
-      return { success: false, message: 'Please enter a valid HTTP/HTTPS server URL' };
+    let url = this.config.serverUrl?.trim() || getDefaultServerUrl();
+    if (!url.startsWith('http')) {
+      const origin = (typeof window !== 'undefined' && window.location?.origin) ? window.location.origin : 'https://music-hlq1.onrender.com';
+      url = `${origin}${url.startsWith('/') ? '' : '/'}${url}`;
     }
 
     try {

@@ -276,6 +276,21 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  const isHandlingFinishRef = useRef(false);
+
+  const handleSongFinished = () => {
+    if (isHandlingFinishRef.current) return;
+    isHandlingFinishRef.current = true;
+
+    const { repeatMode } = stateRef.current;
+    if (repeatMode === "one") {
+      isHandlingFinishRef.current = false;
+      soundRef.current?.replayAsync().catch(() => {});
+    } else {
+      internalNextSong();
+    }
+  };
+
   const internalNextSong = () => {
     const { isShuffle, currentQueue, playlist, currentSong, repeatMode } = stateRef.current;
     const activeQueue = currentQueue.length > 0 ? currentQueue : playlist;
@@ -286,11 +301,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       nextIndex = Math.floor(Math.random() * activeQueue.length);
     } else {
       const currentIndex = activeQueue.findIndex(s => s.id === currentSong?.id);
-      nextIndex = (currentIndex + 1);
+      nextIndex = currentIndex + 1;
       if (nextIndex >= activeQueue.length) {
         if (repeatMode === "all") {
           nextIndex = 0;
         } else {
+          // Reached end of queue in repeatMode "none"
+          setIsPlaying(false);
           return;
         }
       }
@@ -301,38 +318,66 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const onPlaybackStatusUpdate = (status: any) => {
     setPlaybackStatus(status);
     setIsPlaying(status.isPlaying ?? false);
-    if (status.didJustFinish) {
-      const { repeatMode } = stateRef.current;
-      if (repeatMode === "one") {
-        soundRef.current?.replayAsync().catch(() => {});
-      } else {
-        internalNextSong();
-      }
+
+    const isFinished =
+      status.didJustFinish ||
+      (status.isLoaded &&
+        !status.isPlaying &&
+        status.durationMillis &&
+        status.positionMillis &&
+        status.durationMillis > 0 &&
+        status.positionMillis >= status.durationMillis - 400);
+
+    if (isFinished) {
+      handleSongFinished();
     }
   };
 
   const playSong = async (song: Song, customQueue?: Song[]) => {
     try {
-      if (customQueue) {
-        setCurrentQueue(customQueue);
-      } else if (currentQueue.length === 0 || !currentQueue.find(s => s.id === song.id)) {
-        setCurrentQueue(playlist);
-      }
+      isHandlingFinishRef.current = false;
+
+      const queueToUse = customQueue || (stateRef.current.currentQueue.length > 0 ? stateRef.current.currentQueue : playlist);
+      setCurrentQueue(queueToUse);
+      stateRef.current.currentQueue = queueToUse;
+      setCurrentSong(song);
+      stateRef.current.currentSong = song;
 
       if (soundRef.current) {
-        await soundRef.current.unloadAsync().catch(() => {});
+        try {
+          await soundRef.current.unloadAsync();
+        } catch (_) {}
         soundRef.current = null;
       }
 
+      // Rehydrate URI on Web if needed
+      let targetUri = song.uri;
+      if (Platform.OS === 'web') {
+        if (!targetUri || (!targetUri.startsWith('blob:') && !targetUri.startsWith('http') && !targetUri.startsWith('data:'))) {
+          const fresh = await webAudioStorage.getAudioUrl(song.id);
+          if (fresh) {
+            targetUri = fresh;
+            song.uri = fresh;
+          }
+        }
+      }
+
       const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: song.uri },
+        { uri: targetUri },
         { shouldPlay: true, progressUpdateIntervalMillis: 250 },
         onPlaybackStatusUpdate
       );
 
+      // On Web, directly listen to HTMLMediaElement 'ended' event
+      if (Platform.OS === 'web' && (newSound as any)._key) {
+        const mediaElem = (newSound as any)._key as HTMLMediaElement;
+        mediaElem.onended = () => {
+          handleSongFinished();
+        };
+      }
+
       soundRef.current = newSound;
       setSound(newSound);
-      setCurrentSong(song);
       setIsPlaying(true);
     } catch (error) {
       console.error("Error playing song", error);

@@ -28,7 +28,9 @@ const SettingsScreen = ({ route }: any) => {
 
   useEffect(() => {
     loadAdSettings();
-    setKeepAliveConfig(keepAliveService.getConfig());
+    keepAliveService.init().then(cfg => {
+      setKeepAliveConfig({ ...cfg });
+    });
     const unsubscribe = keepAliveService.subscribe((cfg) => {
       setKeepAliveConfig({ ...cfg });
     });

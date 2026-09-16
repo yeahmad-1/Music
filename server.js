@@ -223,10 +223,48 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  // HTTPS enforcement on reverse-proxy environments (Render)
+  if (req.headers['x-forwarded-proto'] === 'http') {
+    res.writeHead(301, { Location: `https://${req.headers.host}${req.url}` });
+    return res.end();
+  }
+
   // Built-in Healthcheck endpoint for keep-alive pings
   if (req.url === '/health' || req.url === '/ping') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('OK');
+  }
+
+  // API: Settings Backup & Persistence
+  if (req.url === '/api/settings') {
+    const SETTINGS_FILE = path.join(__dirname, '.app_settings.json');
+    if (req.method === 'GET') {
+      try {
+        if (fs.existsSync(SETTINGS_FILE)) {
+          const data = fs.readFileSync(SETTINGS_FILE, 'utf8');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(data);
+        }
+      } catch (_) {}
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end('{}');
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          fs.writeFileSync(SETTINGS_FILE, JSON.stringify(parsed, null, 2), 'utf8');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
   }
 
   // API: YouTube Resolver (Node backend, zero CORS issues!)
@@ -335,6 +373,36 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
+// Automatic Server-Side Keep-Alive Heartbeat
+// Pings external URL every 4 minutes to ensure Render free tier never spins down
+const SERVER_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.SERVER_URL || 'https://music-hlq1.onrender.com').replace(/\/$/, '') + '/ping';
+
+function startServerKeepAlive() {
+  console.log(`[KeepAlive] Automatic server heartbeat active for: ${SERVER_PING_URL}`);
+  
+  // Initial ping 15s after startup
+  setTimeout(() => {
+    pingSelf();
+  }, 15000);
+
+  // Periodic heartbeat every 4 minutes (Render free tier timeout is 15 minutes)
+  setInterval(() => {
+    pingSelf();
+  }, 4 * 60 * 1000);
+}
+
+async function pingSelf() {
+  try {
+    const res = await fetch(SERVER_PING_URL, {
+      headers: { 'User-Agent': 'OfflineMusicApp-ServerSelfPing/1.0' }
+    });
+    console.log(`[KeepAlive] Heartbeat ping sent to ${SERVER_PING_URL} (Status: ${res.status})`);
+  } catch (err) {
+    console.warn(`[KeepAlive] Heartbeat ping warning: ${err.message}`);
+  }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Web server listening on port ${PORT}`);
+  startServerKeepAlive();
 });
