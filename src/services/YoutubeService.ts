@@ -37,6 +37,10 @@ export class YoutubeService {
     const embedMatch = cleanUrl.match(/embed\/([a-zA-Z0-9_-]{11})/);
     if (embedMatch && embedMatch[1]) return embedMatch[1];
 
+    // raw 11-char video ID
+    const directMatch = cleanUrl.match(/^([a-zA-Z0-9_-]{11})$/);
+    if (directMatch && directMatch[1]) return directMatch[1];
+
     return null;
   }
 
@@ -46,198 +50,100 @@ export class YoutubeService {
   static async resolveAudio(url: string): Promise<YoutubeAudioResult> {
     const videoId = this.extractVideoId(url);
     if (!videoId) {
-      throw new Error('Invalid YouTube URL. Please paste a valid YouTube video or shorts link.');
+      throw new Error('Invalid YouTube URL or ID. Please paste a valid YouTube track link.');
     }
 
     const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    let lastError: any = null;
 
-    // Strategy 0: Server-side API endpoint (Node.js backend, bypasses browser CORS!)
+    // On Web (browser): Always use the backend API endpoint to prevent browser CORS blocks!
     if (typeof window !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
         const res = await fetch(`/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
 
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.success && data.streamUrl) {
-            return {
-              title: data.title,
-              streamUrl: data.streamUrl,
-              videoId: data.videoId || videoId,
-            };
-          }
+        const data = await res.json().catch(() => null);
+        if (res.ok && data && data.success && data.streamUrl) {
+          return {
+            title: data.title,
+            streamUrl: data.streamUrl,
+            videoId: data.videoId || videoId,
+          };
+        } else {
+          throw new Error(data?.error || `Server extraction failed (status ${res.status})`);
         }
-      } catch (err) {
-        // Fall back to client-side strategies
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          throw new Error('Audio extraction timed out. Please try again.');
+        }
+        throw new Error(err.message || 'Could not extract audio stream from this link. Please verify the URL.');
       }
     }
 
-    // Strategy 1: VidsSave high-speed audio extraction engine
+    // On Mobile (Platform.OS !== 'web'):
+    // 1. Try server endpoint first
     try {
-      const vidssaveRes = await fetch('https://api.vidssave.com/api/contentsite_api/media/parse', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Origin': 'https://id.vidssave.com',
-          'Referer': 'https://id.vidssave.com/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-        body: `auth=20250901majwlqo&domain=api-ak.vidssave.com&origin=source&link=${encodeURIComponent(fullUrl)}`,
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 35000);
+      const res = await fetch(`https://music-hlq1.onrender.com/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
+        signal: controller.signal,
       });
-      if (vidssaveRes.ok) {
-        const j = await vidssaveRes.json();
-        if (j.status === 1 && j.data) {
-          const rawTitle = j.data.title || `YouTube Audio - ${videoId}`;
-          const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
-          const resources = j.data.resources || [];
-          const audioResources = resources.filter((r: any) => r.type === 'audio');
-
-          // Check for converted MP3 download
-          const mp3 = audioResources.find((r: any) => r.format === 'MP3' && r.resource_content) || audioResources.find((r: any) => r.resource_content);
-          if (mp3) {
-            try {
-              const r1 = await fetch('https://api.vidssave.com/api/contentsite_api/media/download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://id.vidssave.com', Referer: 'https://id.vidssave.com/' },
-                body: `auth=20250901majwlqo&domain=api-ak.vidssave.com&request=${encodeURIComponent(mp3.resource_content)}&no_encrypt=1`,
-              });
-              const j1 = await r1.json();
-              if (j1 && j1.status === 1 && j1.data?.task_id) {
-                const q = `auth=20250901majwlqo&domain=api-ak.vidssave.com&task_id=${encodeURIComponent(j1.data.task_id)}&download_domain=vidssave.com&origin=content_site`;
-                const r2 = await fetch(`https://api.vidssave.com/api/contentsite_api/media/download_query?${q}`);
-                const text = await r2.text();
-                const m = text.match(/"download_link":"([^"]+)"/);
-                if (m && m[1]) {
-                  return { title, streamUrl: m[1].replace(/\\/g, ''), videoId };
-                }
-              }
-            } catch (convErr) {}
-          }
-
-          const directAudio = audioResources.find((r: any) => r.download_url);
-          if (directAudio && directAudio.download_url) {
-            return { title, streamUrl: directAudio.download_url, videoId };
-          }
-        }
+      clearTimeout(timeoutId);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.success && data.streamUrl) {
+        const streamUrl = data.streamUrl.startsWith('/')
+          ? `https://music-hlq1.onrender.com${data.streamUrl}`
+          : data.streamUrl;
+        return {
+          title: data.title,
+          streamUrl,
+          videoId: data.videoId || videoId,
+        };
       }
-    } catch (vErr) {
-      lastError = vErr;
-    }
+    } catch (_) {}
 
-    // Strategy 2: Cobalt API (fastest and cleanest MP3 audio extraction)
-    const cobaltInstances = [
-      'https://api.cobalt.tools',
-      'https://cobalt-api.kwiatekm.tokyo',
-      'https://cobalt.xy2401.com',
+    // 2. Direct mobile Invidious fallback
+    const mobileInstances = [
+      'https://invidious.f5.si',
+      'https://invidious.nerdvpn.de',
+      'https://yt.chocolatemoo53.com',
+      'https://invidious.tiekoetter.com',
+      'https://inv.nadeko.net'
     ];
 
-    for (const endpoint of cobaltInstances) {
+    for (const base of mobileInstances) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 9000);
-
-        const res = await fetch(endpoint, {
-          method: 'POST',
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`${base}/api/v1/videos/${videoId}`, {
           headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
           },
-          body: JSON.stringify({
-            url: fullUrl,
-            downloadMode: 'audio',
-            audioFormat: 'mp3',
-          }),
-          signal: controller.signal,
+          signal: controller.signal
         });
         clearTimeout(timeoutId);
 
         if (res.ok) {
           const data = await res.json();
-          if (data && (data.url || (data.status === 'stream' && data.url) || (data.status === 'tunnel' && data.url))) {
-            return {
-              title: data.filename ? data.filename.replace(/\.[^/.]+$/, '') : `YouTube Audio - ${videoId}`,
-              streamUrl: data.url,
-              videoId,
-            };
-          }
-        }
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    // Strategy 2: Piped API audio stream instances
-    const pipedInstances = [
-      'https://pipedapi.kavin.rocks',
-      'https://api.piped.privacydev.net',
-      'https://piped-api.lunar.icu',
-    ];
-
-    for (const base of pipedInstances) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 7000);
-
-        const res = await fetch(`${base}/streams/${videoId}`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.audioStreams && data.audioStreams.length > 0) {
-            // Pick highest quality audio stream
-            const sorted = data.audioStreams.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
-            const bestStream = sorted[0];
+          const audioFormats = (data.adaptiveFormats || []).filter((f: any) => f.type && f.type.startsWith('audio/'));
+          if (audioFormats.length > 0) {
+            const m4a = audioFormats.find((f: any) => f.container === 'm4a' || f.type.includes('mp4') || f.itag === '140');
+            const sorted = audioFormats.sort((a: any, b: any) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+            const best = m4a || sorted[0];
             return {
               title: data.title || `YouTube Audio - ${videoId}`,
-              streamUrl: bestStream.url,
+              streamUrl: best.url,
               videoId,
             };
           }
         }
-      } catch (err) {
-        lastError = err;
-      }
+      } catch (_) {}
     }
 
-    // Strategy 3: Invidious API audio streams
-    const invidiousInstances = [
-      'https://inv.nadeko.net',
-      'https://invidious.nerdvpn.de',
-      'https://vid.puffyan.us',
-    ];
-
-    for (const base of invidiousInstances) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 7000);
-
-        const res = await fetch(`${base}/api/v1/videos/${videoId}`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.adaptiveFormats) {
-            const audioFormats = data.adaptiveFormats.filter((f: any) => f.type && f.type.startsWith('audio/'));
-            if (audioFormats.length > 0) {
-              const bestAudio = audioFormats[0];
-              return {
-                title: data.title || `YouTube Audio - ${videoId}`,
-                streamUrl: bestAudio.url,
-                videoId,
-              };
-            }
-          }
-        }
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    throw new Error(lastError?.message || 'Could not extract audio stream from this video. Please verify the URL.');
+    throw new Error('Could not extract audio stream from this video. Please verify the link.');
   }
 }

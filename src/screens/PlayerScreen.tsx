@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, StyleSheet, Animated, Dimensions, Image, TouchableOpacity, Linking, PanResponder, Platform } from 'react-native';
+import { View, StyleSheet, Dimensions, Image, TouchableOpacity, Linking, PanResponder, Platform } from 'react-native';
 import { IconButton, Text, Surface, useTheme } from 'react-native-paper';
 import { useAudio } from '../context/AudioContext';
 import { adService, WheelAdConfig } from '../services/AdService';
@@ -15,7 +15,6 @@ const PlayerScreen = () => {
   } = useAudio();
 
   const theme = useTheme();
-  const rotateAnim = useRef(new Animated.Value(0)).current;
   const [adConfig, setAdConfig] = useState<WheelAdConfig | null>(null);
 
   useEffect(() => {
@@ -31,25 +30,6 @@ const PlayerScreen = () => {
       );
     }
   };
-
-  useEffect(() => {
-    if (isPlaying) {
-      Animated.loop(
-        Animated.timing(rotateAnim, {
-          toValue: 1,
-          duration: 20000,
-          useNativeDriver: true,
-        })
-      ).start();
-    } else {
-      rotateAnim.stopAnimation();
-    }
-  }, [isPlaying]);
-
-  const rotation = rotateAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
 
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubPositionMillis, setScrubPositionMillis] = useState<number | null>(null);
@@ -230,7 +210,7 @@ const PlayerScreen = () => {
         activeOpacity={adConfig?.enabled && adConfig?.targetUrl ? 0.85 : 1}
         onPress={handleWheelPress}
       >
-        <Animated.View style={[styles.albumArtContainer, { transform: [{ rotate: rotation }] }]}>
+        <View style={styles.albumArtContainer}>
           <Surface style={[styles.surface, {
             backgroundColor: theme.dark ? '#0F3460' : '#FFF0F3',
             borderColor: adConfig?.enabled ? theme.colors.secondary : theme.colors.primary,
@@ -252,7 +232,7 @@ const PlayerScreen = () => {
               />
             )}
           </Surface>
-        </Animated.View>
+        </View>
       </TouchableOpacity>
 
       {adConfig?.enabled && (

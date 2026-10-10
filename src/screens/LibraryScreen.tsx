@@ -1247,13 +1247,13 @@ const LibraryScreen = ({ navigation }: any) => {
           }}
           style={{ backgroundColor: theme.colors.surface }}
         >
-          <Dialog.Title style={{ fontWeight: 'bold' }}>Download from YouTube</Dialog.Title>
+          <Dialog.Title style={{ fontWeight: 'bold' }}>Download Audio from YouTube</Dialog.Title>
           <Dialog.Content>
             <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 14 }}>
-              Paste any YouTube video or shorts link to download its audio directly as an MP3 for offline listening.
+              Paste any YouTube song or track link to download its audio directly as an MP3 for offline listening.
             </Text>
             <TextInput
-              label="YouTube Video / Shorts Link"
+              label="YouTube Music / Track Link"
               placeholder="https://youtube.com/watch?v=..."
               value={youtubeUrl}
               onChangeText={(text) => {
@@ -1269,7 +1269,7 @@ const LibraryScreen = ({ navigation }: any) => {
             />
             <TextInput
               label="Custom Track Title (Optional)"
-              placeholder="Leave blank to use video title"
+              placeholder="Leave blank to use track title"
               value={youtubeCustomTitle}
               onChangeText={setYoutubeCustomTitle}
               mode="outlined"

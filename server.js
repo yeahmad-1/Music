@@ -35,181 +35,95 @@ function extractVideoId(urlStr) {
   if (shortsMatch) return shortsMatch[1];
   const embedMatch = urlStr.match(/embed\/([a-zA-Z0-9_-]{11})/);
   if (embedMatch) return embedMatch[1];
+  const directMatch = urlStr.trim().match(/^([a-zA-Z0-9_-]{11})$/);
+  if (directMatch) return directMatch[1];
   return null;
 }
 
 const { Readable } = require('stream');
 
-const VIDSSAVE_API_BASE = 'https://api.vidssave.com/api/contentsite_api';
-const VIDSSAVE_DOMAIN = 'api-ak.vidssave.com';
-let VIDSSAVE_AUTH = '20250901majwlqo';
+let invidiousInstances = [
+  'https://invidious.f5.si',
+  'https://invidious.nerdvpn.de',
+  'https://yt.chocolatemoo53.com',
+  'https://invidious.tiekoetter.com',
+  'https://inv.nadeko.net'
+];
 
-async function refreshVidssaveAuth() {
+let lastInstanceRefresh = 0;
+
+async function refreshInvidiousPool() {
+  const now = Date.now();
+  if (now - lastInstanceRefresh < 15 * 60 * 1000) return;
+  lastInstanceRefresh = now;
   try {
-    const html = await (await fetch('https://id.vidssave.com/home-1ey')).text();
-    const matches = html.match(/src=["']([^"']+\.js)["']/g) || [];
-    for (const match of matches) {
-      const pathMatch = match.match(/src=["']([^"']+)["']/);
-      if (!pathMatch) continue;
-      const url = pathMatch[1].startsWith('http') ? pathMatch[1] : 'https://id.vidssave.com' + pathMatch[1];
-      try {
-        const js = await (await fetch(url)).text();
-        const m = js.match(/auth[":=]+([0-9]{8}[a-z0-9]+)/i);
-        if (m) {
-          VIDSSAVE_AUTH = m[1];
-          return VIDSSAVE_AUTH;
+    const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
+    if (res.ok) {
+      const list = await res.json();
+      const healthy = list
+        .filter(item => item[1] && item[1].type === 'https' && !item[0].includes('.onion') && !item[0].includes('.i2p'))
+        .map(item => item[1].uri.replace(/\/$/, ''))
+        .filter(Boolean);
+      for (const uri of healthy) {
+        if (!invidiousInstances.includes(uri)) {
+          invidiousInstances.push(uri);
         }
-      } catch {}
+      }
     }
-  } catch {}
-  return VIDSSAVE_AUTH;
+  } catch (_) {}
 }
 
 async function resolveYouTubeAudio(videoUrl) {
   const videoId = extractVideoId(videoUrl);
-  if (!videoId) throw new Error('Invalid YouTube URL');
+  if (!videoId) throw new Error('Invalid YouTube track URL or ID');
 
-  const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  refreshInvidiousPool().catch(() => {});
+
   let lastError = null;
-
-  // Primary Strategy: High-speed VidsSave conversion & extraction engine
-  try {
-    await refreshVidssaveAuth();
-    const callParse = (origin) => fetch(`${VIDSSAVE_API_BASE}/media/parse`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Origin': 'https://id.vidssave.com',
-        'Referer': 'https://id.vidssave.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      },
-      body: new URLSearchParams({ auth: VIDSSAVE_AUTH, domain: VIDSSAVE_DOMAIN, origin, link: fullUrl }),
-    }).then(r => r.json());
-
-    const [src, cache] = await Promise.all([
-      callParse('source').catch(() => null),
-      callParse('cache').catch(() => null),
-    ]);
-
-    const json = (src && src.status === 1) ? src : cache;
-    if (json && json.status === 1 && json.data) {
-      const rawTitle = json.data.title || `YouTube Audio - ${videoId}`;
-      const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
-      const resources = json.data.resources || [];
-      const audioResources = resources.filter(r => r.type === 'audio');
-
-      // 1. Try converted MP3 download stream
-      const mp3Resource = audioResources.find(r => r.format === 'MP3' && r.resource_content) || audioResources.find(r => r.resource_content);
-      if (mp3Resource) {
-        try {
-          const body = new URLSearchParams({
-            auth: VIDSSAVE_AUTH,
-            domain: VIDSSAVE_DOMAIN,
-            request: mp3Resource.resource_content,
-            no_encrypt: '1',
-          });
-          const r1 = await fetch(`${VIDSSAVE_API_BASE}/media/download`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'Origin': 'https://id.vidssave.com',
-              'Referer': 'https://id.vidssave.com/',
-            },
-            body,
-          });
-          const j1 = await r1.json();
-          if (j1 && j1.status === 1 && j1.data?.task_id) {
-            const q = new URLSearchParams({
-              auth: VIDSSAVE_AUTH,
-              domain: VIDSSAVE_DOMAIN,
-              task_id: j1.data.task_id,
-              download_domain: 'vidssave.com',
-              origin: 'content_site',
-            });
-            const r2 = await fetch(`${VIDSSAVE_API_BASE}/media/download_query?${q}`);
-            const text = await r2.text();
-            const m = text.match(/"download_link":"([^"]+)"/);
-            if (m && m[1]) {
-              const directLink = m[1].replace(/\\/g, '');
-              return { title, streamUrl: directLink, videoId };
-            }
-          }
-        } catch (convErr) {
-          // Fall through to direct download_url
-        }
-      }
-
-      // 2. Direct download_url fallback
-      const directAudio = audioResources.find(r => r.download_url);
-      if (directAudio && directAudio.download_url) {
-        return { title, streamUrl: directAudio.download_url, videoId };
-      }
-    }
-  } catch (err) {
-    lastError = err;
-  }
-
-  // Fallback Strategy: Cobalt API
-  const cobaltEndpoints = [
-    'https://api.cobalt.tools',
-    'https://cobalt-api.kwiatekm.tokyo',
-    'https://cobalt.xy2401.com',
-  ];
-
-  for (const endpoint of cobaltEndpoints) {
+  for (let i = 0; i < invidiousInstances.length; i++) {
+    const base = invidiousInstances[i];
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 4500);
+      const res = await fetch(`${base}/api/v1/videos/${videoId}`, {
         headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         },
-        body: JSON.stringify({
-          url: fullUrl,
-          downloadMode: 'audio',
-          audioFormat: 'mp3',
-        }),
+        signal: ctrl.signal
       });
+      clearTimeout(tid);
 
       if (res.ok) {
         const data = await res.json();
-        const stream = data.url || (data.status === 'stream' && data.url) || (data.status === 'tunnel' && data.url);
-        if (stream) {
+        const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
+        if (audioFormats.length > 0) {
+          // Promote working instance to front of pool
+          if (i > 0) {
+            invidiousInstances.splice(i, 1);
+            invidiousInstances.unshift(base);
+          }
+
+          // Prefer AAC m4a / mp4 for universal browser/mobile audio compatibility
+          const m4a = audioFormats.find(f => f.container === 'm4a' || f.type.includes('mp4') || f.itag === '140');
+          const sorted = audioFormats.sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+          const best = m4a || sorted[0];
+
+          const rawTitle = data.title || `YouTube Audio - ${videoId}`;
+          const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
+
           return {
-            title: data.filename ? data.filename.replace(/\.[^/.]+$/, '') : `YouTube Audio - ${videoId}`,
-            streamUrl: stream,
+            title,
+            streamUrl: best.url,
             videoId,
           };
         }
       }
-    } catch (e) {}
+    } catch (err) {
+      lastError = err;
+    }
   }
 
-  // Fallback Strategy: Piped API
-  const pipedEndpoints = [
-    'https://pipedapi.kavin.rocks',
-    'https://api.piped.privacydev.net',
-    'https://piped-api.lunar.icu',
-  ];
-
-  for (const base of pipedEndpoints) {
-    try {
-      const res = await fetch(`${base}/streams/${videoId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.audioStreams && data.audioStreams.length > 0) {
-          const sorted = data.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-          return {
-            title: data.title || `YouTube Audio - ${videoId}`,
-            streamUrl: sorted[0].url,
-            videoId,
-          };
-        }
-      }
-    } catch (e) {}
-  }
-
-  throw new Error(lastError?.message || 'Unable to resolve YouTube audio stream. Please check video accessibility.');
+  throw new Error(lastError?.message || 'Unable to extract audio from YouTube. Please verify the URL.');
 }
 
 const server = http.createServer(async (req, res) => {
@@ -318,15 +232,27 @@ const server = http.createServer(async (req, res) => {
       }
 
       res.writeHead(response.status, {
-        'Content-Type': response.headers.get('content-type') || 'audio/mpeg',
+        'Content-Type': response.headers.get('content-type') || 'audio/mp4',
         'Access-Control-Allow-Origin': '*',
         'Accept-Ranges': 'bytes',
         ...(response.headers.get('content-length') ? { 'Content-Length': response.headers.get('content-length') } : {}),
       });
 
       if (response.body) {
-        const stream = Readable.fromWeb(response.body);
-        stream.pipe(res);
+        const reader = response.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const ok = res.write(value);
+            if (!ok) {
+              await new Promise(r => res.once('drain', r));
+            }
+          }
+        } finally {
+          reader.cancel().catch(() => {});
+        }
+        res.end();
       } else {
         res.end();
       }
