@@ -238,12 +238,17 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (Platform.OS === 'web') {
         // In browser: download stream into Blob and store in IndexedDB
-        const response = await fetch(audioInfo.streamUrl);
-        if (!response.ok) {
-          throw new Error(`Download failed with HTTP status ${response.status}`);
+        try {
+          const response = await fetch(audioInfo.streamUrl);
+          if (response.ok) {
+            const blob = await response.blob();
+            destinationUri = await webAudioStorage.storeAudio(id, blob);
+          } else {
+            destinationUri = audioInfo.directUrl || audioInfo.streamUrl;
+          }
+        } catch {
+          destinationUri = audioInfo.directUrl || audioInfo.streamUrl;
         }
-        const blob = await response.blob();
-        destinationUri = await webAudioStorage.storeAudio(id, blob);
       } else {
         const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
         const docDir = FileSystem.documentDirectory || "";

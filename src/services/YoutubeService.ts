@@ -6,6 +6,7 @@
 export interface YoutubeAudioResult {
   title: string;
   streamUrl: string;
+  directUrl?: string;
   videoId: string;
 }
 
@@ -70,6 +71,7 @@ export class YoutubeService {
           return {
             title: data.title,
             streamUrl: data.streamUrl,
+            directUrl: data.directUrl || data.streamUrl,
             videoId: data.videoId || videoId,
           };
         } else {
