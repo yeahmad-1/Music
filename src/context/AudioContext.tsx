@@ -290,24 +290,39 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (Platform.OS === 'web') {
         // In browser: download stream into Blob and store in IndexedDB
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000);
-        let response: Response;
-        try {
-          response = await fetch(audioInfo.streamUrl, { signal: controller.signal });
-          clearTimeout(timeoutId);
-        } catch (fetchErr: any) {
-          clearTimeout(timeoutId);
-          if (fetchErr.name === 'AbortError') {
-            throw new Error('Download timed out. Please try again.');
+        const videoId = audioInfo.videoId || YoutubeService.extractVideoId(url) || '';
+        const candidateStreamUrls = videoId
+          ? YoutubeService.getCandidateProxyUrls(videoId)
+          : [audioInfo.streamUrl];
+
+        let response: Response | null = null;
+        let lastFetchErr: any = null;
+
+        for (const streamUrl of candidateStreamUrls) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
+            const res = await fetch(streamUrl, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (res.ok) {
+              response = res;
+              break;
+            } else {
+              const errText = await res.text().catch(() => '');
+              lastFetchErr = new Error(errText || `Server returned HTTP ${res.status}`);
+            }
+          } catch (fetchErr: any) {
+            lastFetchErr = fetchErr;
           }
-          throw fetchErr;
         }
 
-        if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          throw new Error(errText || `Download failed with HTTP status ${response.status}`);
+        if (!response || !response.ok) {
+          if (lastFetchErr?.name === 'AbortError') {
+            throw new Error('Download timed out after 2 minutes. Please verify your connection and try again.');
+          }
+          throw new Error(lastFetchErr?.message || 'Download failed. Audio stream could not be loaded.');
         }
+
         const blob = await response.blob();
         if (blob.size < 1000) {
           throw new Error('Downloaded audio stream is empty or invalid.');

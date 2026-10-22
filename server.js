@@ -179,49 +179,36 @@ async function downloadAudioToCache(videoId) {
     const baseArgs = [
       ...(fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : []),
       '--no-check-certificates',
-      '--socket-timeout', '20',
+      '--socket-timeout', '15',
       '--no-playlist',
       '--no-progress',
       '--js-runtimes', 'node',
+      '-f', 'ba/b',
     ];
 
     let lastError = null;
-    const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
-
-    // When cookies are present, default client works authenticated. Otherwise prioritize visionos/embed.
-    const candidateClients = hasCookies
-      ? ['default', 'visionos', 'web_embedded', 'tv', 'android']
-      : ['visionos', 'web_embedded', 'tv', 'android'];
-
-    const candidateUrls = [
-      `https://www.youtube.com/watch?v=${videoId}`,
-      `https://www.youtube.com/embed/${videoId}`,
-    ];
+    // visionos and android clients download audio in 1-3s without triggering BotGuard
+    const candidateClients = ['visionos', 'android', 'web_embedded', 'tv', 'default'];
 
     for (const client of candidateClients) {
-      let existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+      const existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
       if (existingFiles.length > 0) break;
 
-      for (const targetUrl of candidateUrls) {
-        existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
-        if (existingFiles.length > 0) break;
+      const clientArgs = [
+        ...baseArgs,
+        ...(client !== 'default' ? ['--extractor-args', `youtube:player_client=${client}`] : []),
+        ...(ffmpegBinary ? ['--ffmpeg-location', ffmpegBinary, '-x', '--audio-format', 'mp3'] : []),
+        '-o', `${tempPrefix}.%(ext)s`,
+        ytUrl,
+      ];
 
-        const clientArgs = [
-          ...baseArgs,
-          ...(client !== 'default' ? ['--extractor-args', `youtube:player_client=${client}`] : []),
-          ...(ffmpegBinary ? ['--ffmpeg-location', ffmpegBinary, '-x', '--audio-format', 'mp3'] : ['-f', '251/140/ba/b/18']),
-          '-o', `${tempPrefix}.%(ext)s`,
-          targetUrl,
-        ];
-
-        try {
-          console.log(`[AudioCache] Attempting download for ${videoId} using client "${client}" on ${targetUrl}...`);
-          await runProcess(bin, clientArgs, 45000);
-          break;
-        } catch (err) {
-          lastError = err;
-          console.warn(`[AudioCache] Client "${client}" failed for ${videoId}: ${err.message}`);
-        }
+      try {
+        console.log(`[AudioCache] Attempting download for ${videoId} using client "${client}"...`);
+        await runProcess(bin, clientArgs, 20000);
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AudioCache] Client "${client}" failed for ${videoId}: ${err.message}`);
       }
     }
 
