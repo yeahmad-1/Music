@@ -1,6 +1,6 @@
 /**
  * Service to resolve audio stream URLs and titles from YouTube links.
- * Uses a multi-instance fallback (Cobalt API, Invidious, and Piped) to guarantee high availability.
+ * Backed by yt-dlp + ffmpeg backend with automatic fallback endpoints.
  */
 
 export interface YoutubeAudioResult {
@@ -42,7 +42,64 @@ export class YoutubeService {
     const directMatch = cleanUrl.match(/^([a-zA-Z0-9_-]{11})$/);
     if (directMatch && directMatch[1]) return directMatch[1];
 
+    // query param id=ID
+    const idParam = cleanUrl.match(/[?&]id=([a-zA-Z0-9_-]{11})/);
+    if (idParam && idParam[1]) return idParam[1];
+
     return null;
+  }
+
+  /**
+   * Determine available backend API endpoints with multi-tier fallback.
+   * Works on localhost:8081 (Expo web), localhost:3000 (node server),
+   * Render production deployment, and mobile native apps.
+   */
+  static getApiBaseUrls(): string[] {
+    const urls: string[] = [];
+    if (typeof window !== 'undefined' && window.location) {
+      const port = window.location.port;
+      const hostname = window.location.hostname;
+      const origin = window.location.origin;
+
+      // 1. If currently loaded directly on port 3000 or on Render / custom domain
+      if (port === '3000' || (!port && hostname !== 'localhost' && hostname !== '127.0.0.1')) {
+        urls.push(origin);
+      } else {
+        // 2. Running on Expo dev server (port 8081 or 19006):
+        // Try local node server on port 3000 first
+        urls.push('http://localhost:3000');
+        // If testing on LAN phone, try same host on port 3000
+        if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+          urls.push(`http://${hostname}:3000`);
+        }
+      }
+      // Always include production cloud backend as fallback
+      urls.push('https://music-hlq1.onrender.com');
+    } else {
+      // Native iOS / Android
+      urls.push('http://localhost:3000');
+      urls.push('https://music-hlq1.onrender.com');
+    }
+
+    // Deduplicate preserving order
+    return Array.from(new Set(urls.filter(Boolean)));
+  }
+
+  /**
+   * Generate an absolute proxy URL for a YouTube video track.
+   */
+  static getProxyUrl(videoId: string): string {
+    const bases = this.getApiBaseUrls();
+    const primary = bases[0] || 'http://localhost:3000';
+    return `${primary}/api/proxy-audio?id=${videoId}`;
+  }
+
+  /**
+   * Return candidate proxy URLs across all backend endpoints for failover.
+   */
+  static getCandidateProxyUrls(videoId: string): string[] {
+    const bases = this.getApiBaseUrls();
+    return bases.map(base => `${base}/api/proxy-audio?id=${videoId}`);
   }
 
   /**
@@ -55,97 +112,40 @@ export class YoutubeService {
     }
 
     const fullUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const baseCandidates = this.getApiBaseUrls();
 
-    // On Web (browser): Always use the backend API endpoint to prevent browser CORS blocks!
-    if (typeof window !== 'undefined') {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 45000);
+    let lastError: any = null;
+
+    // Try server endpoints (local node backend, then Render cloud backend)
+    for (const base of baseCandidates) {
       try {
-        const res = await fetch(`/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const res = await fetch(`${base}/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
 
         const data = await res.json().catch(() => null);
         if (res.ok && data && data.success && data.streamUrl) {
+          const streamUrl = data.streamUrl.startsWith('/') ? `${base}${data.streamUrl}` : data.streamUrl;
           return {
-            title: data.title,
-            streamUrl: data.streamUrl,
-            directUrl: data.directUrl || data.streamUrl,
+            title: data.title || `YouTube Audio - ${videoId}`,
+            streamUrl,
+            directUrl: streamUrl,
             videoId: data.videoId || videoId,
           };
-        } else {
-          throw new Error(data?.error || `Server extraction failed (status ${res.status})`);
+        } else if (data && data.error) {
+          lastError = new Error(data.error);
         }
       } catch (err: any) {
-        clearTimeout(timeoutId);
-        if (err.name === 'AbortError') {
-          throw new Error('Audio extraction timed out. Please try again.');
-        }
-        throw new Error(err.message || 'Could not extract audio stream from this link. Please verify the URL.');
+        lastError = err;
       }
     }
 
-    // On Mobile (Platform.OS !== 'web'):
-    // 1. Try server endpoint first
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 35000);
-      const res = await fetch(`https://music-hlq1.onrender.com/api/youtube?url=${encodeURIComponent(fullUrl)}`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      const data = await res.json().catch(() => null);
-      if (res.ok && data && data.success && data.streamUrl) {
-        const streamUrl = data.streamUrl.startsWith('/')
-          ? `https://music-hlq1.onrender.com${data.streamUrl}`
-          : data.streamUrl;
-        return {
-          title: data.title,
-          streamUrl,
-          videoId: data.videoId || videoId,
-        };
-      }
-    } catch (_) {}
-
-    // 2. Direct mobile Invidious fallback
-    const mobileInstances = [
-      'https://invidious.f5.si',
-      'https://invidious.nerdvpn.de',
-      'https://yt.chocolatemoo53.com',
-      'https://invidious.tiekoetter.com',
-      'https://inv.nadeko.net'
-    ];
-
-    for (const base of mobileInstances) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
-        const res = await fetch(`${base}/api/v1/videos/${videoId}`, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          },
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          const audioFormats = (data.adaptiveFormats || []).filter((f: any) => f.type && f.type.startsWith('audio/'));
-          if (audioFormats.length > 0) {
-            const m4a = audioFormats.find((f: any) => f.container === 'm4a' || f.type.includes('mp4') || f.itag === '140');
-            const sorted = audioFormats.sort((a: any, b: any) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
-            const best = m4a || sorted[0];
-            return {
-              title: data.title || `YouTube Audio - ${videoId}`,
-              streamUrl: best.url,
-              videoId,
-            };
-          }
-        }
-      } catch (_) {}
-    }
-
-    throw new Error('Could not extract audio stream from this video. Please verify the link.');
+    throw new Error(
+      lastError?.message ||
+      'Could not extract audio from this YouTube video. Please make sure the backend server (port 3000) is running.'
+    );
   }
 }

@@ -1,4 +1,4 @@
-import React, { useState, useLayoutEffect, useRef } from 'react';
+import React, { useState, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform, PanResponder } from 'react-native';
 import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
@@ -65,16 +65,19 @@ const LibraryScreen = ({ navigation }: any) => {
   const [isDownloadingYt, setIsDownloadingYt] = useState(false);
   const [ytDownloadError, setYtDownloadError] = useState<string | null>(null);
 
-  let currentDisplayList: Song[] = [];
-  if (viewingPlaylistId) {
-    const cp = customPlaylists.find(p => p.id === viewingPlaylistId);
-    if (cp) {
-      currentDisplayList = playlist.filter(s => cp.songIds.includes(s.id));
-      currentDisplayList.sort((a, b) => cp.songIds.indexOf(a.id) - cp.songIds.indexOf(b.id));
+  const currentDisplayList: Song[] = useMemo(() => {
+    if (viewingPlaylistId) {
+      const cp = customPlaylists.find(p => p.id === viewingPlaylistId);
+      if (cp) {
+        const list = playlist.filter(s => cp.songIds.includes(s.id));
+        return list.sort((a, b) => cp.songIds.indexOf(a.id) - cp.songIds.indexOf(b.id));
+      }
+      return [];
     }
-  } else {
-    currentDisplayList = playlist.filter(song => {
-      const matchesSearch = song.name.toLowerCase().includes(searchQuery.toLowerCase());
+
+    const query = searchQuery.trim().toLowerCase();
+    let list = playlist.filter(song => {
+      const matchesSearch = !query || song.name.toLowerCase().includes(query);
       const matchesTab =
         activeTab === 'all' ||
         activeTab === 'recent' ||
@@ -83,9 +86,10 @@ const LibraryScreen = ({ navigation }: any) => {
     });
 
     if (activeTab === 'recent') {
-      currentDisplayList = [...currentDisplayList].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      list = [...list].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     }
-  }
+    return list;
+  }, [playlist, customPlaylists, viewingPlaylistId, searchQuery, activeTab]);
 
   const toggleSelectAll = () => {
     if (selectedIds.length === currentDisplayList.length) {
@@ -816,8 +820,10 @@ const LibraryScreen = ({ navigation }: any) => {
           renderItem={renderPlaylistItem}
           style={styles.list}
           contentContainerStyle={styles.listContent}
-          initialNumToRender={50}
-          maxToRenderPerBatch={50}
+          initialNumToRender={15}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS !== 'web'}
           showsVerticalScrollIndicator={true}
           keyboardShouldPersistTaps="handled"
           ItemSeparatorComponent={() => (
@@ -838,8 +844,10 @@ const LibraryScreen = ({ navigation }: any) => {
           renderItem={renderItem}
           style={styles.list}
           contentContainerStyle={styles.listContent}
-          initialNumToRender={50}
-          maxToRenderPerBatch={50}
+          initialNumToRender={15}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS !== 'web'}
           showsVerticalScrollIndicator={true}
           keyboardShouldPersistTaps="handled"
           {...(isReorderMode ? ({ dataSet: { 'reorder-container': 'true' } } as any) : {})}
@@ -1399,6 +1407,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: '100%',
     minHeight: 0,
+    ...(Platform.OS === 'web' ? { overflowY: 'auto' as any } : {}),
   },
   listContent: {
     paddingBottom: 160,

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, Dimensions, Image, TouchableOpacity, Linking, PanResponder, Platform } from 'react-native';
 import { IconButton, Text, Surface, useTheme } from 'react-native-paper';
-import { useAudio } from '../context/AudioContext';
+import { useAudio, usePlaybackStatus } from '../context/AudioContext';
 import { adService, WheelAdConfig } from '../services/AdService';
 
 const { width } = Dimensions.get('window');
@@ -9,10 +9,11 @@ const { width } = Dimensions.get('window');
 const PlayerScreen = () => {
   const { 
     currentSong, isPlaying, pauseSong, resumeSong,
-    nextSong, previousSong, playbackStatus, toggleFavorite,
+    nextSong, previousSong, toggleFavorite,
     isShuffle, toggleShuffle, repeatMode, toggleRepeat,
     seek
   } = useAudio();
+  const playbackStatus = usePlaybackStatus();
 
   const theme = useTheme();
   const [adConfig, setAdConfig] = useState<WheelAdConfig | null>(null);

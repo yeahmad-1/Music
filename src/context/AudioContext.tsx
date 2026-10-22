@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, useEffect, useRef } from "react";
+import React, { createContext, useState, useContext, useEffect, useRef, useMemo } from "react";
 import { Platform } from "react-native";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
@@ -56,6 +56,11 @@ interface AudioContextType {
 }
 
 const AudioContext = createContext<AudioContextType | undefined>(undefined);
+const PlaybackStatusContext = createContext<any>(null);
+
+export const usePlaybackStatus = () => {
+  return useContext(PlaybackStatusContext);
+};
 
 export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [playlist, setPlaylist] = useState<Song[]>([]);
@@ -121,6 +126,14 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 }
               } catch (e) {
                 console.warn("Could not rehydrate audio for song", song.id, e);
+              }
+
+              // Resilience: If not found in IndexedDB, and song is from YouTube, prepare proxy URL fallback
+              const videoId = song.sourceUrl
+                ? YoutubeService.extractVideoId(song.sourceUrl)
+                : (song.source === 'youtube' ? YoutubeService.extractVideoId(song.uri) : null);
+              if (videoId) {
+                return { ...song, uri: YoutubeService.getProxyUrl(videoId) };
               }
               return song;
             })
@@ -238,16 +251,31 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (Platform.OS === 'web') {
         // In browser: download stream into Blob and store in IndexedDB
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
+        let response: Response;
         try {
-          const response = await fetch(audioInfo.streamUrl);
-          if (response.ok) {
-            const blob = await response.blob();
-            destinationUri = await webAudioStorage.storeAudio(id, blob);
-          } else {
-            destinationUri = audioInfo.directUrl || audioInfo.streamUrl;
+          response = await fetch(audioInfo.streamUrl, { signal: controller.signal });
+          clearTimeout(timeoutId);
+        } catch (fetchErr: any) {
+          clearTimeout(timeoutId);
+          if (fetchErr.name === 'AbortError') {
+            throw new Error('Download timed out. Please try again.');
           }
+          throw fetchErr;
+        }
+
+        if (!response.ok) {
+          throw new Error(`Download failed with HTTP status ${response.status}`);
+        }
+        const blob = await response.blob();
+        // Ensure explicit audio/mpeg MIME type for standard MP3 playback & exact duration
+        const mp3Blob = new Blob([blob], { type: 'audio/mpeg' });
+        try {
+          destinationUri = await webAudioStorage.storeAudio(id, mp3Blob);
         } catch {
-          destinationUri = audioInfo.directUrl || audioInfo.streamUrl;
+          // If IndexedDB storage fails, fall back to in-memory blob URL
+          destinationUri = URL.createObjectURL(mp3Blob);
         }
       } else {
         const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
@@ -355,23 +383,109 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         soundRef.current = null;
       }
 
-      // Rehydrate URI on Web if needed
+      // Rehydrate URI on Web: blob: URLs from previous sessions expire upon page reload.
+      // Always attempt to get a fresh active blob URL from IndexedDB:
       let targetUri = song.uri;
       if (Platform.OS === 'web') {
-        if (!targetUri || (!targetUri.startsWith('blob:') && !targetUri.startsWith('http') && !targetUri.startsWith('data:'))) {
+        try {
           const fresh = await webAudioStorage.getAudioUrl(song.id);
           if (fresh) {
             targetUri = fresh;
             song.uri = fresh;
           }
+        } catch (_) {}
+      }
+
+      const videoId = song.sourceUrl
+        ? YoutubeService.extractVideoId(song.sourceUrl)
+        : (song.source === 'youtube' ? YoutubeService.extractVideoId(song.uri) : null);
+
+      // On Web: if targetUri is an expired blob URL not present in IndexedDB,
+      // avoid dead blob stall by routing directly to the proxy audio stream
+      if (Platform.OS === 'web' && targetUri && targetUri.startsWith('blob:')) {
+        const hasOfflineBlob = await webAudioStorage.hasAudio(song.id);
+        if (!hasOfflineBlob && videoId) {
+          targetUri = YoutubeService.getProxyUrl(videoId);
         }
       }
 
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: targetUri },
-        { shouldPlay: true, progressUpdateIntervalMillis: 250 },
-        onPlaybackStatusUpdate
-      );
+      let newSound: Audio.Sound | null = null;
+      let usedProxyStreamUrl: string | null = null;
+
+      try {
+        const result = await Audio.Sound.createAsync(
+          { uri: targetUri },
+          { shouldPlay: true, progressUpdateIntervalMillis: 250 },
+          onPlaybackStatusUpdate
+        );
+        if (!result.status || !result.status.isLoaded) {
+          throw new Error((result.status as any)?.error || 'Audio source failed to load');
+        }
+        newSound = result.sound;
+        if (targetUri.includes('/api/proxy-audio')) {
+          usedProxyStreamUrl = targetUri;
+        }
+      } catch (playErr: any) {
+        console.warn(`[AudioContext] Primary playback failed for "${song.name}":`, playErr?.message);
+
+        // Fallback 1: Try fresh blob from IndexedDB if not already tried
+        let recovered = false;
+        if (Platform.OS === 'web') {
+          try {
+            const fresh = await webAudioStorage.getAudioUrl(song.id);
+            if (fresh && fresh !== targetUri) {
+              targetUri = fresh;
+              song.uri = fresh;
+              const retryResult = await Audio.Sound.createAsync(
+                { uri: targetUri },
+                { shouldPlay: true, progressUpdateIntervalMillis: 250 },
+                onPlaybackStatusUpdate
+              );
+              if (retryResult.status && retryResult.status.isLoaded) {
+                newSound = retryResult.sound;
+                recovered = true;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // Fallback 2: Resilience recovery for YouTube tracks across all available backend endpoints!
+        if (!recovered && videoId) {
+          const candidates = YoutubeService.getCandidateProxyUrls(videoId);
+          for (const candidate of candidates) {
+            try {
+              const fallbackResult = await Audio.Sound.createAsync(
+                { uri: candidate },
+                { shouldPlay: true, progressUpdateIntervalMillis: 250 },
+                onPlaybackStatusUpdate
+              );
+              if (fallbackResult.status && fallbackResult.status.isLoaded) {
+                newSound = fallbackResult.sound;
+                recovered = true;
+                usedProxyStreamUrl = candidate;
+                break;
+              }
+            } catch (fallbackErr) {
+              console.warn('[AudioContext] Proxy endpoint candidate failed:', candidate);
+            }
+          }
+        }
+
+        if (!recovered || !newSound) {
+          throw playErr;
+        }
+      }
+
+      if (!newSound) return;
+
+      // In the background, auto-repair the local cache with the clean MP3 if stream was used
+      if (Platform.OS === 'web' && usedProxyStreamUrl) {
+        fetch(usedProxyStreamUrl)
+          .then(r => r.blob())
+          .then(b => webAudioStorage.storeAudio(song.id, b))
+          .then(newUrl => { song.uri = newUrl; })
+          .catch(() => {});
+      }
 
       // On Web, directly listen to HTMLMediaElement 'ended' event
       if (Platform.OS === 'web' && (newSound as any)._key) {
@@ -587,37 +701,48 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     await saveCustomPlaylists(updated);
   };
 
+  const audioContextValue = useMemo(() => ({
+    playlist,
+    customPlaylists,
+    currentSong,
+    isPlaying,
+    playbackStatus,
+    isShuffle,
+    repeatMode,
+    importSongs,
+    downloadFromYoutube,
+    playSong,
+    pauseSong,
+    resumeSong,
+    nextSong,
+    previousSong,
+    deleteSong,
+    deleteSongsBulk,
+    toggleFavorite,
+    setFavoritesBulk,
+    toggleShuffle,
+    toggleRepeat,
+    seek,
+    createCustomPlaylist,
+    deleteCustomPlaylist,
+    updateCustomPlaylistOrder,
+    removeSongsFromCustomPlaylist,
+    reorderSongs,
+    updatePlaylistOrder,
+  }), [
+    playlist,
+    customPlaylists,
+    currentSong,
+    isPlaying,
+    isShuffle,
+    repeatMode,
+  ]);
+
   return (
-    <AudioContext.Provider value={{
-      playlist,
-      customPlaylists,
-      currentSong,
-      isPlaying,
-      playbackStatus,
-      isShuffle,
-      repeatMode,
-      importSongs,
-      downloadFromYoutube,
-      playSong,
-      pauseSong,
-      resumeSong,
-      nextSong,
-      previousSong,
-      deleteSong,
-      deleteSongsBulk,
-      toggleFavorite,
-      setFavoritesBulk,
-      toggleShuffle,
-      toggleRepeat,
-      seek,
-      createCustomPlaylist,
-      deleteCustomPlaylist,
-      updateCustomPlaylistOrder,
-      removeSongsFromCustomPlaylist,
-      reorderSongs,
-      updatePlaylistOrder
-    }}>
-      {children}
+    <AudioContext.Provider value={audioContextValue}>
+      <PlaybackStatusContext.Provider value={playbackStatus}>
+        {children}
+      </PlaybackStatusContext.Provider>
     </AudioContext.Provider>
   );
 };

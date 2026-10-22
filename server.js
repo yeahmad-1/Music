@@ -41,95 +41,263 @@ function extractVideoId(urlStr) {
 }
 
 const { Readable } = require('stream');
+const { spawn, spawnSync } = require('child_process');
+const { ensureYtDlp } = require('./scripts/ensure-ytdlp');
 
-let invidiousInstances = [
-  'https://invidious.f5.si',
-  'https://invidious.nerdvpn.de',
-  'https://yt.chocolatemoo53.com',
-  'https://invidious.tiekoetter.com',
-  'https://inv.nadeko.net'
-];
+let ffmpegBinary = null;
+try {
+  ffmpegBinary = require('ffmpeg-static');
+} catch (_) {}
 
-let lastInstanceRefresh = 0;
-
-async function refreshInvidiousPool() {
-  const now = Date.now();
-  if (now - lastInstanceRefresh < 15 * 60 * 1000) return;
-  lastInstanceRefresh = now;
+const CACHE_DIR = path.join(__dirname, 'audio_cache');
+if (!fs.existsSync(CACHE_DIR)) {
   try {
-    const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
-    if (res.ok) {
-      const list = await res.json();
-      const healthy = list
-        .filter(item => item[1] && item[1].type === 'https' && !item[0].includes('.onion') && !item[0].includes('.i2p'))
-        .map(item => item[1].uri.replace(/\/$/, ''))
-        .filter(Boolean);
-      for (const uri of healthy) {
-        if (!invidiousInstances.includes(uri)) {
-          invidiousInstances.push(uri);
-        }
-      }
-    }
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
   } catch (_) {}
 }
+
+const activeDownloads = new Map();
+
+function runProcess(bin, args, timeoutMs = 60000) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill(); } catch (_) {}
+      reject(new Error(`Process timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
+    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) return;
+      if (code === 0) resolve();
+      else reject(new Error(`Exit code ${code}: ${stderr.slice(-300)}`));
+    });
+    proc.on('error', err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function serveAudioFile(filePath, req, res, mimeType = 'audio/mpeg') {
+  try {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    const range = req.headers.range;
+
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+      if (isNaN(start) || start >= fileSize || (parts[1] && end >= fileSize) || start > end) {
+        res.writeHead(416, {
+          'Content-Range': `bytes */${fileSize}`,
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end();
+      }
+
+      const chunksize = (end - start) + 1;
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': mimeType,
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range, Content-Type',
+        'Cache-Control': 'public, max-age=604800, immutable',
+      });
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(filePath, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range, Content-Type',
+        'Cache-Control': 'public, max-age=604800, immutable',
+      });
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Error serving audio: ' + err.message);
+    }
+  }
+}
+
+async function downloadAudioToCache(videoId) {
+  const cachedFilePath = path.join(CACHE_DIR, `${videoId}.mp3`);
+  if (fs.existsSync(cachedFilePath) && fs.statSync(cachedFilePath).size > 10000) {
+    return cachedFilePath;
+  }
+
+  if (activeDownloads.has(videoId)) {
+    return activeDownloads.get(videoId);
+  }
+
+  const downloadPromise = (async () => {
+    const bin = await getYtDlp();
+    if (!bin) throw new Error('Audio engine is initializing, please retry shortly.');
+
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
+
+    const baseArgs = [
+      '--no-check-certificates',
+      '--socket-timeout', '10',
+      '--no-playlist',
+      '--js-runtimes', 'node',
+    ];
+
+    if (ffmpegBinary) {
+      baseArgs.push('--ffmpeg-location', ffmpegBinary);
+    }
+
+    // Primary: Convert to true MP3 with exact duration & ID3 tags (solves extra minutes bug!)
+    const primaryArgs = [
+      ...baseArgs,
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '5',
+      '-o', `${tempPrefix}.%(ext)s`,
+      ytUrl,
+    ];
+
+    try {
+      await runProcess(bin, primaryArgs);
+    } catch (err) {
+      console.warn(`[AudioCache] Primary download failed: ${err.message}. Trying android client fallback...`);
+      const fallbackArgs = [
+        ...baseArgs,
+        '--extractor-args', 'youtube:player_client=android,web',
+        '-x',
+        '--audio-format', 'mp3',
+        '--audio-quality', '5',
+        '-o', `${tempPrefix}.%(ext)s`,
+        ytUrl,
+      ];
+      try {
+        await runProcess(bin, fallbackArgs);
+      } catch (fallbackErr) {
+        console.warn(`[AudioCache] Android fallback failed: ${fallbackErr.message}. Trying direct format 140/ba...`);
+        const rawArgs = [
+          ...baseArgs,
+          '-f', '140/ba[ext=m4a]/ba/b',
+          '-o', `${tempPrefix}.%(ext)s`,
+          ytUrl,
+        ];
+        await runProcess(bin, rawArgs);
+      }
+    }
+
+    const expectedMp3 = `${tempPrefix}.mp3`;
+    if (fs.existsSync(expectedMp3) && fs.statSync(expectedMp3).size > 5000) {
+      try {
+        if (fs.existsSync(cachedFilePath)) fs.unlinkSync(cachedFilePath);
+      } catch (_) {}
+      fs.renameSync(expectedMp3, cachedFilePath);
+      return cachedFilePath;
+    }
+
+    const files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+    if (files.length > 0) {
+      const generated = path.join(CACHE_DIR, files[0]);
+      if (fs.statSync(generated).size > 5000) {
+        if (fs.existsSync(cachedFilePath)) {
+          try { fs.unlinkSync(cachedFilePath); } catch (_) {}
+        }
+        fs.renameSync(generated, cachedFilePath);
+        return cachedFilePath;
+      }
+    }
+
+    throw new Error('Downloaded audio file not found on disk');
+  })();
+
+  activeDownloads.set(videoId, downloadPromise);
+  try {
+    const resultPath = await downloadPromise;
+    return resultPath;
+  } finally {
+    activeDownloads.delete(videoId);
+  }
+}
+
+let ytDlpBinary = null;
+async function getYtDlp() {
+  if (ytDlpBinary) return ytDlpBinary;
+  try {
+    ytDlpBinary = await ensureYtDlp(__dirname);
+    return ytDlpBinary;
+  } catch (err) {
+    console.error('[yt-dlp] Error ensuring binary:', err.message);
+    return null;
+  }
+}
+
+// Preload yt-dlp binary asynchronously on boot
+getYtDlp().catch(() => {});
 
 async function resolveYouTubeAudio(videoUrl) {
   const videoId = extractVideoId(videoUrl);
   if (!videoId) throw new Error('Invalid YouTube track URL or ID');
 
-  refreshInvidiousPool().catch(() => {});
+  let title = `YouTube Track - ${videoId}`;
 
-  let lastError = null;
-  for (let i = 0; i < invidiousInstances.length; i++) {
-    const base = invidiousInstances[i];
-    try {
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 4500);
-      const res = await fetch(`${base}/api/v1/videos/${videoId}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        signal: ctrl.signal
-      });
-      clearTimeout(tid);
-
-      if (res.ok) {
-        const data = await res.json();
-        const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
-        if (audioFormats.length > 0) {
-          // Promote working instance to front of pool
-          if (i > 0) {
-            invidiousInstances.splice(i, 1);
-            invidiousInstances.unshift(base);
-          }
-
-          // Prefer AAC m4a / mp4 for universal browser/mobile audio compatibility
-          const m4a = audioFormats.find(f => f.container === 'm4a' || f.type.includes('mp4') || f.itag === '140');
-          const sorted = audioFormats.sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
-          const best = m4a || sorted[0];
-
-          const rawTitle = data.title || `YouTube Audio - ${videoId}`;
-          const title = rawTitle.replace(/[\\/:*?"<>|]/g, '_').trim();
-
-          return {
-            title,
-            streamUrl: best.url,
-            videoId,
-          };
-        }
+  // 1. Instant title fetch via official YouTube oEmbed API (< 400ms)
+  try {
+    const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
+      headers: { 'User-Agent': 'OfflineMusicApp/1.0' }
+    });
+    if (oembedRes.ok) {
+      const data = await oembedRes.json();
+      if (data.title) {
+        title = data.title;
       }
-    } catch (err) {
-      lastError = err;
+    }
+  } catch (_) {}
+
+  // 2. Fallback to yt-dlp title if oEmbed didn't provide one
+  if (title.startsWith('YouTube Track -')) {
+    const bin = await getYtDlp();
+    if (bin) {
+      try {
+        const titleProc = spawnSync(bin, [
+          '--print', '%(title)s',
+          '--no-playlist',
+          `https://www.youtube.com/watch?v=${videoId}`
+        ], { encoding: 'utf8', timeout: 10000 });
+        if (titleProc.stdout && titleProc.stdout.trim()) {
+          title = titleProc.stdout.trim();
+        }
+      } catch (_) {}
     }
   }
 
-  throw new Error(lastError?.message || 'Unable to extract audio from YouTube. Please verify the URL.');
+  const cleanTitle = title.replace(/[\\/:*?"<>|]/g, '_').trim();
+  const proxyUrl = `/api/proxy-audio?id=${videoId}`;
+
+  return {
+    title: cleanTitle,
+    streamUrl: proxyUrl,
+    directUrl: proxyUrl,
+    videoId,
+  };
 }
 
 const server = http.createServer(async (req, res) => {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
   if (req.method === 'OPTIONS') {
@@ -193,13 +361,12 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const result = await resolveYouTubeAudio(targetUrl);
-      const proxyUrl = `/api/proxy-audio?url=${encodeURIComponent(result.streamUrl)}`;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         success: true,
         title: result.title,
-        streamUrl: proxyUrl,
-        directUrl: result.streamUrl,
+        streamUrl: result.streamUrl,
+        directUrl: result.directUrl,
         videoId: result.videoId,
       }));
     } catch (err) {
@@ -208,18 +375,39 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // API: Audio Stream Proxy (allows web browsers to download/play streams without CORS blocks)
+  // API: Audio Stream Proxy (serves cached, accurate MP3 audio with full Range support!)
   if (req.url.startsWith('/api/proxy-audio')) {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const streamUrl = reqUrl.searchParams.get('url');
+    const videoId = reqUrl.searchParams.get('id') || extractVideoId(reqUrl.searchParams.get('url'));
+    const genericStreamUrl = reqUrl.searchParams.get('url');
 
-    if (!streamUrl) {
-      res.writeHead(400, { 'Content-Type': 'text/plain' });
-      return res.end('Missing url parameter');
+    if (videoId) {
+      const cachedFilePath = path.join(CACHE_DIR, `${videoId}.mp3`);
+      if (fs.existsSync(cachedFilePath) && fs.statSync(cachedFilePath).size > 5000) {
+        return serveAudioFile(cachedFilePath, req, res, 'audio/mpeg');
+      }
+
+      try {
+        const filePath = await downloadAudioToCache(videoId);
+        return serveAudioFile(filePath, req, res, 'audio/mpeg');
+      } catch (err) {
+        console.error(`[AudioProxy] Failed to fetch/convert audio for ${videoId}:`, err.message);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end(`Audio stream extraction failed: ${err.message}`);
+        }
+        return;
+      }
     }
 
+    if (!genericStreamUrl) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      return res.end('Missing id or url parameter');
+    }
+
+    // Generic URL proxy fallback
     try {
-      const response = await fetch(streamUrl, {
+      const response = await fetch(genericStreamUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           ...(req.headers.range ? { Range: req.headers.range } : {}),

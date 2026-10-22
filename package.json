@@ -13,6 +13,7 @@
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.24",
     "expo-status-bar": "~3.0.9",
+    "ffmpeg-static": "^5.3.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
@@ -30,13 +31,14 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "start": "expo start",
-    "build": "expo export --platform web",
+    "start": "node scripts/start-both.js",
+    "expo": "expo start",
+    "build": "node scripts/ensure-ytdlp.js && expo export --platform web && node scripts/patch-html.js",
     "postinstall": "npm run build",
     "serve": "node server.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "node scripts/start-both.js --web"
   },
   "private": true
 }

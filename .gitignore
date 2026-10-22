@@ -44,3 +44,10 @@ yarn-error.*
 .vscode/
 .idea/
 
+# Local binaries and server settings
+/bin/
+.app_settings.json
+audio_cache/
+
+
+
