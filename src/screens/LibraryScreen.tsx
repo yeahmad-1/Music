@@ -260,6 +260,7 @@ const LibraryScreen = ({ navigation }: any) => {
     setIsSavingCookies(true);
     try {
       const bases = YoutubeService.getApiBaseUrls();
+      let saved = false;
       for (const base of bases) {
         try {
           const res = await fetch(`${base}/api/cookies`, {
@@ -268,12 +269,17 @@ const LibraryScreen = ({ navigation }: any) => {
             body: JSON.stringify({ cookies: cookiesInput })
           });
           if (res.ok) {
+            saved = true;
             setIsCookiesModalVisible(false);
             setYtDownloadError(null);
             setCookiesInput('');
             break;
           }
         } catch (_) {}
+      }
+      if (saved && youtubeUrl.trim()) {
+        // Automatically resume download once cookies are stored
+        handleDownloadYoutube();
       }
     } finally {
       setIsSavingCookies(false);
@@ -1331,17 +1337,33 @@ const LibraryScreen = ({ navigation }: any) => {
                 {(ytDownloadError.includes('bot') || ytDownloadError.includes('cookies')) && (
                   <View style={{ marginTop: 6 }}>
                     <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 12, lineHeight: 16 }}>
-                      YouTube requires cookies on cloud IPs. You can paste your browser cookies below, or import audio files directly with "+ Import Audio".
+                      YouTube blocks automated cloud servers. To fix this:
                     </Text>
-                    <Button
-                      mode="contained-tonal"
-                      compact
-                      onPress={() => setIsCookiesModalVisible(true)}
-                      style={{ marginTop: 8, alignSelf: 'flex-start' }}
-                      icon="cookie"
-                    >
-                      Configure YouTube Cookies
-                    </Button>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                      <Button
+                        mode="contained-tonal"
+                        compact
+                        onPress={() => setIsCookiesModalVisible(true)}
+                        icon="cookie"
+                      >
+                        Paste Cookies
+                      </Button>
+                      <Button
+                        mode="outlined"
+                        compact
+                        onPress={() => {
+                          if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                            window.open('https://cobalt.tools', '_blank');
+                          }
+                        }}
+                        icon="open-in-new"
+                      >
+                        Web Downloader
+                      </Button>
+                    </View>
+                    <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11, marginTop: 6 }}>
+                      Or directly import any downloaded MP3 into your library using "+ Import Audio".
+                    </Text>
                   </View>
                 )}
               </View>
