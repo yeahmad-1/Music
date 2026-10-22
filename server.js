@@ -178,10 +178,13 @@ async function downloadViaLoader(videoId) {
       const streamId = matchId[1].replace('card-', '').replace('_progress', '');
       console.log(`[AudioCache] Cloud streamId for ${videoId}: ${streamId}`);
 
+      const progUrl = data.progress_url || `${host}/api/progress?id=${streamId}`;
+      console.log(`[AudioCache] Polling progress via ${progUrl}`);
+
       // Poll progress up to 30 times (~36 seconds)
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 1200));
-        const progRes = await fetch(`${host}/ajax/progress.php?id=${streamId}`, {
+        const progRes = await fetch(progUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           signal: AbortSignal.timeout(8000)
         });
@@ -191,8 +194,12 @@ async function downloadViaLoader(videoId) {
 
         const isFinished = (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url;
         if (isFinished) {
-          console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}! Downloading audio...`);
-          const streamRes = await fetch(prog.download_url, {
+          let downloadTargetUrl = prog.download_url;
+          if (downloadTargetUrl.startsWith('http://')) {
+            downloadTargetUrl = downloadTargetUrl.replace('http://', 'https://');
+          }
+          console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}: ${downloadTargetUrl}`);
+          const streamRes = await fetch(downloadTargetUrl, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
             signal: AbortSignal.timeout(60000)
           });
@@ -597,9 +604,10 @@ const server = http.createServer(async (req, res) => {
       const matchId = html.match(/id="([^"]+)"/);
       const streamId = matchId ? matchId[1].replace('card-', '').replace('_progress', '') : null;
 
+      const progUrl = data.progress_url || `https://p.savenow.to/api/progress?id=${streamId}`;
       for (let i = 0; i < 25; i++) {
         await new Promise(r => setTimeout(r, 1200));
-        const progRes = await fetch(`https://p.savenow.to/ajax/progress.php?id=${streamId}`, {
+        const progRes = await fetch(progUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           signal: AbortSignal.timeout(8000)
         });
