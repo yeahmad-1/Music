@@ -586,6 +586,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // API: Diagnostics for Cloud MP3 resolver
+  if (req.url.startsWith('/api/diag-loader')) {
+    const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
+    try {
+      const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(10000)
+      });
+      const status = initRes.status;
+      const text = await initRes.text();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: true, status, text: text.slice(0, 300) }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+  }
+
   // API: Diagnostics for yt-dlp on Render / Cloud Host
   if (req.url.startsWith('/api/diag-ytdlp')) {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
