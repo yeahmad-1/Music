@@ -174,50 +174,101 @@ async function downloadAudioToCache(videoId) {
     if (!bin) throw new Error('Audio engine is initializing, please retry shortly.');
 
     const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const embedUrl = `https://www.youtube.com/embed/${videoId}`;
     const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
 
-    const baseArgs = [
-      ...(fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : []),
+    const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+    const commonArgs = [
       '--no-check-certificates',
       '--socket-timeout', '15',
       '--no-playlist',
       '--no-progress',
-      '--js-runtimes', 'node',
-      '-f', 'ba/b',
+      '--js-runtimes', `node:${process.execPath}`,
+      '-f', 'ba/b/251/140/18',
+      '-o', `${tempPrefix}.%(ext)s`,
     ];
 
-    let lastError = null;
-    // visionos and android clients download audio in 1-3s without triggering BotGuard
-    const candidateClients = ['visionos', 'android', 'web_embedded', 'tv', 'default'];
+    // Multi-tier extraction strategies:
+    // 1. Mobile multi-client WITHOUT cookies (avoids datacenter IP web bot-detection and invalid cookie issues)
+    // 2. Mobile multi-client WITH cookies (if available)
+    // 3. Dedicated android client without cookies
+    // 4. Web embedded client with embed URL
+    // 5. Authenticated web client with cookies (if available)
+    const strategies = [
+      {
+        name: 'mobile-no-cookies',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
+          '--no-cookies',
+        ],
+      },
+      ...(hasCookies ? [{
+        name: 'mobile-with-cookies',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
+          '--cookies', COOKIES_FILE,
+          '--no-write-cookies',
+        ],
+      }] : []),
+      {
+        name: 'android-standalone',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=android',
+          '--no-cookies',
+        ],
+      },
+      {
+        name: 'web-embedded',
+        url: embedUrl,
+        args: [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=web_embedded',
+          '--no-cookies',
+        ],
+      },
+      ...(hasCookies ? [{
+        name: 'web-with-cookies',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--cookies', COOKIES_FILE,
+          '--no-write-cookies',
+        ],
+      }] : []),
+    ];
 
-    for (const client of candidateClients) {
+    const strategyErrors = [];
+
+    for (const strat of strategies) {
       const existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
       if (existingFiles.length > 0) break;
 
-      const clientArgs = [
-        ...baseArgs,
-        ...(client !== 'default' ? ['--extractor-args', `youtube:player_client=${client}`] : []),
-        ...(ffmpegBinary ? ['--ffmpeg-location', ffmpegBinary, '-x', '--audio-format', 'mp3'] : []),
-        '-o', `${tempPrefix}.%(ext)s`,
-        ytUrl,
-      ];
-
       try {
-        console.log(`[AudioCache] Attempting download for ${videoId} using client "${client}"...`);
-        await runProcess(bin, clientArgs, 20000);
-        break;
+        console.log(`[AudioCache] Attempting download for ${videoId} using strategy "${strat.name}"...`);
+        await runProcess(bin, [...strat.args, strat.url], 25000);
+        const checkFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+        if (checkFiles.length > 0) {
+          console.log(`[AudioCache] Strategy "${strat.name}" succeeded for ${videoId}!`);
+          break;
+        }
       } catch (err) {
-        lastError = err;
-        console.warn(`[AudioCache] Client "${client}" failed for ${videoId}: ${err.message}`);
+        strategyErrors.push(`[${strat.name}]: ${err.message}`);
+        console.warn(`[AudioCache] Strategy "${strat.name}" failed for ${videoId}: ${err.message}`);
       }
     }
 
     // Check if any file was downloaded
     let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
 
-    // Attempt 4: Invidious API fallback
+    // Attempt Invidious API fallback if all yt-dlp strategies failed
     if (files.length === 0) {
-      console.warn(`[AudioCache] yt-dlp attempts failed. Trying Invidious API fallback for ${videoId}...`);
+      console.warn(`[AudioCache] yt-dlp strategies failed for ${videoId}. Trying Invidious API fallback...`);
       const invidiousPool = [
         'https://invidious.nerdvpn.de',
         'https://invidious.f5.si',
@@ -272,7 +323,7 @@ async function downloadAudioToCache(videoId) {
       }
       fs.renameSync(generated, targetFile);
 
-      // If downloaded format is not MP3 and ffmpeg is available, convert it to clean standard MP3
+      // If downloaded format is not MP3 and ffmpeg is available, convert it to clean standard MP3 in background
       if (ext !== '.mp3' && ffmpegBinary) {
         const mp3Target = path.join(CACHE_DIR, `${videoId}.mp3`);
         try {
@@ -297,8 +348,9 @@ async function downloadAudioToCache(videoId) {
     }
 
     throw new Error(
-      lastError?.message ||
-      'Audio download failed: YouTube blocked access or video is unavailable. Please verify the link or try importing audio directly.'
+      strategyErrors.length > 0
+        ? `Audio download failed: ${strategyErrors.join(' | ')}`
+        : 'Audio download failed: YouTube blocked access or video is unavailable. Please verify the link.'
     );
   })();
 
@@ -458,6 +510,51 @@ const server = http.createServer(async (req, res) => {
         }
       });
       return;
+    }
+  }
+
+  // API: Diagnostics for yt-dlp on Render / Cloud Host
+  if (req.url.startsWith('/api/diag-ytdlp')) {
+    const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
+    const useCookies = reqUrl.searchParams.get('cookies') === '1';
+    const client = reqUrl.searchParams.get('client') || 'visionos,android';
+
+    try {
+      const bin = await getYtDlp();
+      const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+      const testArgs = [
+        '--no-check-certificates',
+        '--socket-timeout', '15',
+        '--no-playlist',
+        '--no-progress',
+        '--js-runtimes', `node:${process.execPath}`,
+        '--extractor-args', `youtube:player_client=${client}`,
+        ...(useCookies && hasCookies ? ['--cookies', COOKIES_FILE, '--no-write-cookies'] : ['--no-cookies']),
+        '-f', 'ba/b/251/140/18',
+        '--get-url',
+        `https://www.youtube.com/watch?v=${videoId}`,
+      ];
+
+      const resOutput = await runProcess(bin, testArgs, 20000);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: true,
+        hasCookies,
+        binaryPath: bin,
+        client,
+        useCookies,
+        url: resOutput.stdout.trim(),
+        stderr: resOutput.stderr,
+      }));
+    } catch (err) {
+      const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        hasCookies,
+        error: err.message,
+      }));
     }
   }
 
