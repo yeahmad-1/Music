@@ -158,56 +158,74 @@ function serveAudioFile(filePath, req, res) {
 }
 
 async function downloadViaLoader(videoId) {
-  try {
-    console.log(`[AudioCache] Attempting cloud MP3 resolver for ${videoId}...`);
-    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!initRes.ok) return null;
-    const data = await initRes.json();
-    if (!data.content) return null;
-    const html = Buffer.from(data.content, 'base64').toString();
-    const matchId = html.match(/id="(card-v2_stream_[^"]+|v2_stream_[^"]+_progress)"/);
-    if (!matchId) return null;
-    const streamId = matchId[1].replace('card-', '').replace('_progress', '');
+  const hosts = ['https://p.savenow.to', 'https://loader.to'];
+  const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Poll progress up to 20 times (~30 seconds)
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 1500));
-      const progRes = await fetch(`https://loader.to/ajax/progress.php?id=${streamId}`, {
+  for (const host of hosts) {
+    try {
+      console.log(`[AudioCache] Attempting cloud MP3 resolver via ${host} for ${videoId}...`);
+      const initRes = await fetch(`${host}/ajax/download.php?format=mp3&url=${encodeURIComponent(ytUrl)}`, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-        signal: AbortSignal.timeout(8000)
+        signal: AbortSignal.timeout(10000)
       });
-      if (progRes.ok) {
-        const prog = await progRes.json();
+      if (!initRes.ok) continue;
+      const data = await initRes.json().catch(() => null);
+      if (!data || !data.content) continue;
+
+      const html = Buffer.from(data.content, 'base64').toString();
+      const matchId = html.match(/id="([^"]+)"/);
+      if (!matchId) continue;
+      const streamId = matchId[1].replace('card-', '').replace('_progress', '');
+      console.log(`[AudioCache] Cloud streamId for ${videoId}: ${streamId}`);
+
+      // Poll progress up to 22 times (~26 seconds)
+      for (let i = 0; i < 22; i++) {
+        await new Promise(r => setTimeout(r, 1200));
+        const progRes = await fetch(`${host}/ajax/progress.php?id=${streamId}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!progRes.ok) continue;
+        const prog = await progRes.json().catch(() => null);
+        if (!prog) continue;
+
         if (prog.success === 1 && prog.download_url) {
-          console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}! Streaming audio...`);
+          console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}! Downloading audio...`);
           const streamRes = await fetch(prog.download_url, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
             signal: AbortSignal.timeout(60000)
           });
-          if (streamRes.ok) {
-            const arrayBuf = await streamRes.arrayBuffer();
-            const buf = Buffer.from(arrayBuf);
-            if (buf.length > 10000) {
-              const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
-              const tempFile = `${targetFile}.tmp-${Date.now()}`;
-              fs.writeFileSync(tempFile, buf);
-              if (fs.existsSync(targetFile)) {
-                try { fs.unlinkSync(targetFile); } catch (_) {}
-              }
-              fs.renameSync(tempFile, targetFile);
-              console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
-              return targetFile;
+          if (!streamRes.ok) continue;
+
+          const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
+          const tempFile = `${targetFile}.tmp-${Date.now()}`;
+          const fileStream = fs.createWriteStream(tempFile);
+          const reader = streamRes.body.getReader();
+          let downloadedBytes = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            fileStream.write(Buffer.from(value));
+            downloadedBytes += value.length;
+          }
+          await new Promise(resolve => fileStream.end(resolve));
+
+          if (fs.existsSync(tempFile) && fs.statSync(tempFile).size > 10000) {
+            if (fs.existsSync(targetFile)) {
+              try { fs.unlinkSync(targetFile); } catch (_) {}
             }
+            fs.renameSync(tempFile, targetFile);
+            console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(downloadedBytes / 1024 / 1024).toFixed(2)} MB)`);
+            return targetFile;
+          } else {
+            try { fs.unlinkSync(tempFile); } catch (_) {}
           }
         }
       }
+    } catch (err) {
+      console.warn(`[AudioCache] Cloud resolver error on ${host} for ${videoId}:`, err.message);
     }
-  } catch (err) {
-    console.warn(`[AudioCache] Cloud resolver error for ${videoId}:`, err.message);
   }
   return null;
 }
@@ -569,18 +587,18 @@ const server = http.createServer(async (req, res) => {
     const pollLogs = [];
     try {
       const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+      const initRes = await fetch(`https://p.savenow.to/ajax/download.php?format=mp3&url=${encodeURIComponent(ytUrl)}`, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         signal: AbortSignal.timeout(10000)
       });
       const data = await initRes.json();
       const html = Buffer.from(data.content, 'base64').toString();
-      const matchId = html.match(/id="(card-v2_stream_[^"]+|v2_stream_[^"]+_progress)"/);
+      const matchId = html.match(/id="([^"]+)"/);
       const streamId = matchId ? matchId[1].replace('card-', '').replace('_progress', '') : null;
 
-      for (let i = 0; i < 15; i++) {
-        await new Promise(r => setTimeout(r, 1500));
-        const progRes = await fetch(`https://loader.to/ajax/progress.php?id=${streamId}`, {
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 1200));
+        const progRes = await fetch(`https://p.savenow.to/ajax/progress.php?id=${streamId}`, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           signal: AbortSignal.timeout(8000)
         });
@@ -615,7 +633,7 @@ const server = http.createServer(async (req, res) => {
     const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
     try {
       const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+      const initRes = await fetch(`https://p.savenow.to/ajax/download.php?format=mp3&url=${encodeURIComponent(ytUrl)}`, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         signal: AbortSignal.timeout(10000)
       });
@@ -639,6 +657,11 @@ const server = http.createServer(async (req, res) => {
     try {
       const bin = await getYtDlp();
       const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+      let safeCookiesFile = null;
+      if (hasCookies) {
+        safeCookiesFile = path.join(CACHE_DIR, 'session_cookies.txt');
+        try { fs.copyFileSync(COOKIES_FILE, safeCookiesFile); } catch (_) { safeCookiesFile = COOKIES_FILE; }
+      }
       const testArgs = [
         '--no-check-certificates',
         '--socket-timeout', '15',
@@ -647,7 +670,7 @@ const server = http.createServer(async (req, res) => {
         '--js-runtimes', `node:${process.execPath}`,
         '--remote-components', 'ejs:github',
         '--extractor-args', `youtube:player_client=${client}`,
-        ...(useCookies && hasCookies ? ['--cookies', COOKIES_FILE] : ['--no-cookies']),
+        ...(useCookies && hasCookies && safeCookiesFile ? ['--cookies', safeCookiesFile] : ['--no-cookies']),
         '-f', 'ba/b/251/140/18',
         '--get-url',
         `https://www.youtube.com/watch?v=${videoId}`,
