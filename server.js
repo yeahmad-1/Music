@@ -178,23 +178,46 @@ async function downloadAudioToCache(videoId) {
     const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
 
     const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+    let safeCookiesFile = null;
+    if (hasCookies) {
+      safeCookiesFile = path.join(CACHE_DIR, 'session_cookies.txt');
+      try { fs.copyFileSync(COOKIES_FILE, safeCookiesFile); } catch (_) { safeCookiesFile = COOKIES_FILE; }
+    }
+
     const commonArgs = [
       '--no-check-certificates',
       '--socket-timeout', '15',
       '--no-playlist',
       '--no-progress',
       '--js-runtimes', `node:${process.execPath}`,
+      '--remote-components', 'ejs:github',
       '-f', 'ba/b/251/140/18',
       '-o', `${tempPrefix}.%(ext)s`,
     ];
 
     // Multi-tier extraction strategies:
-    // 1. Mobile multi-client WITHOUT cookies (avoids datacenter IP web bot-detection and invalid cookie issues)
-    // 2. Mobile multi-client WITH cookies (if available)
-    // 3. Dedicated android client without cookies
-    // 4. Web embedded client with embed URL
-    // 5. Authenticated web client with cookies (if available)
+    // 1. Mobile multi-client WITH cookies (User's authenticated session with mobile agent)
+    // 2. Authenticated web client with cookies
+    // 3. Mobile multi-client WITHOUT cookies
+    // 4. Dedicated android client without cookies
+    // 5. Web embedded client with embed URL
     const strategies = [
+      ...(hasCookies && safeCookiesFile ? [{
+        name: 'mobile-with-cookies',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
+          '--cookies', safeCookiesFile,
+        ],
+      }, {
+        name: 'web-with-cookies',
+        url: ytUrl,
+        args: [
+          ...commonArgs,
+          '--cookies', safeCookiesFile,
+        ],
+      }] : []),
       {
         name: 'mobile-no-cookies',
         url: ytUrl,
@@ -204,16 +227,6 @@ async function downloadAudioToCache(videoId) {
           '--no-cookies',
         ],
       },
-      ...(hasCookies ? [{
-        name: 'mobile-with-cookies',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
-          '--cookies', COOKIES_FILE,
-          '--no-write-cookies',
-        ],
-      }] : []),
       {
         name: 'android-standalone',
         url: ytUrl,
@@ -232,15 +245,6 @@ async function downloadAudioToCache(videoId) {
           '--no-cookies',
         ],
       },
-      ...(hasCookies ? [{
-        name: 'web-with-cookies',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--cookies', COOKIES_FILE,
-          '--no-write-cookies',
-        ],
-      }] : []),
     ];
 
     const strategyErrors = [];
@@ -529,8 +533,9 @@ const server = http.createServer(async (req, res) => {
         '--no-playlist',
         '--no-progress',
         '--js-runtimes', `node:${process.execPath}`,
+        '--remote-components', 'ejs:github',
         '--extractor-args', `youtube:player_client=${client}`,
-        ...(useCookies && hasCookies ? ['--cookies', COOKIES_FILE, '--no-write-cookies'] : ['--no-cookies']),
+        ...(useCookies && hasCookies ? ['--cookies', COOKIES_FILE] : ['--no-cookies']),
         '-f', 'ba/b/251/140/18',
         '--get-url',
         `https://www.youtube.com/watch?v=${videoId}`,
