@@ -118,6 +118,24 @@ export const DownloadStatusBanner: React.FC = () => {
                   </Button>
                 )}
 
+                {isError && task.needsCookies && (
+                  <Button
+                    mode="contained"
+                    compact
+                    buttonColor="#EF4444"
+                    textColor="#FFFFFF"
+                    style={[styles.retryButton, { backgroundColor: '#EF4444', marginRight: 4 }]}
+                    labelStyle={{ fontSize: 11, fontWeight: 'bold' }}
+                    onPress={() => {
+                      if (typeof window !== 'undefined') {
+                        window.dispatchEvent(new CustomEvent('open-cookies-modal'));
+                      }
+                    }}
+                  >
+                    Cookies
+                  </Button>
+                )}
+
                 {isError && (
                   <Button
                     mode="outlined"

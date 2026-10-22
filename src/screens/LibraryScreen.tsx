@@ -71,6 +71,14 @@ const LibraryScreen = ({ navigation }: any) => {
   const [cookiesInput, setCookiesInput] = useState('');
   const [isSavingCookies, setIsSavingCookies] = useState(false);
 
+  useEffect(() => {
+    const handleOpenCookies = () => setIsCookiesModalVisible(true);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('open-cookies-modal', handleOpenCookies);
+      return () => window.removeEventListener('open-cookies-modal', handleOpenCookies);
+    }
+  }, []);
+
   const currentDisplayList: Song[] = useMemo(() => {
     if (viewingPlaylistId) {
       const cp = customPlaylists.find(p => p.id === viewingPlaylistId);
@@ -194,6 +202,7 @@ const LibraryScreen = ({ navigation }: any) => {
               />
               <Divider />
               <Menu.Item onPress={() => { setMenuVisible(false); setIsYoutubeModalVisible(true); }} title="Download from YouTube" leadingIcon="youtube" />
+              <Menu.Item onPress={() => { setMenuVisible(false); setIsCookiesModalVisible(true); }} title="YouTube Cookies" leadingIcon="cookie" />
               <Menu.Item onPress={() => { setMenuVisible(false); handlePickDocument(); }} title="Import Music" leadingIcon="file-import" />
               <Menu.Item onPress={() => { setMenuVisible(false); navigation.navigate('Settings'); }} title="Settings" leadingIcon="cog" />
             </Menu>

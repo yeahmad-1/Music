@@ -30,6 +30,7 @@ export interface DownloadTask {
   title: string;
   status: 'downloading' | 'completed' | 'error';
   errorMessage?: string;
+  needsCookies?: boolean;
   startedAt: number;
   song?: Song;
 }
@@ -407,26 +408,38 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setDownloadTasks(prev => prev.filter(t => t.id !== taskId));
           }, 7000);
         } else {
+          const rawMsg = result.message || '';
+          const isBot = rawMsg.toLowerCase().includes('bot') || rawMsg.toLowerCase().includes('sign in');
+          const friendlyMsg = isBot
+            ? 'YouTube bot verification required on cloud host. Please configure cookies or run locally.'
+            : (rawMsg || 'Download failed. Please check the URL.');
           setDownloadTasks(prev =>
             prev.map(t =>
               t.id === taskId
                 ? {
                     ...t,
                     status: 'error',
-                    errorMessage: result.message || 'Download failed. Please check the URL or cookies.',
+                    errorMessage: friendlyMsg,
+                    needsCookies: isBot,
                   }
                 : t
             )
           );
         }
       } catch (err: any) {
+        const rawMsg = err?.message || '';
+        const isBot = rawMsg.toLowerCase().includes('bot') || rawMsg.toLowerCase().includes('sign in');
+        const friendlyMsg = isBot
+          ? 'YouTube bot verification required on cloud host. Please configure cookies or run locally.'
+          : (rawMsg || 'Download failed.');
         setDownloadTasks(prev =>
           prev.map(t =>
             t.id === taskId
               ? {
                   ...t,
                   status: 'error',
-                  errorMessage: err?.message || 'Download failed.',
+                  errorMessage: friendlyMsg,
+                  needsCookies: isBot,
                 }
               : t
           )
