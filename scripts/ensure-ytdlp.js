@@ -63,31 +63,10 @@ async function ensureYtDlp(customDir) {
     } catch (_) {}
   }
 
-  // 2. Check if yt-dlp exists globally in PATH
-  try {
-    const globalTest = spawnSync('yt-dlp', ['--version'], { encoding: 'utf8' });
-    if (globalTest.status === 0 && globalTest.stdout) {
-      console.log(`[yt-dlp] Using system-installed yt-dlp (v${globalTest.stdout.trim()})`);
-      return 'yt-dlp';
-    }
-  } catch (_) {}
-
-  // 3. Download appropriate binary
-  let downloadUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+  // Determine URL to download (always fetch latest official release from GitHub)
+  let downloadUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
   if (isWin) {
     downloadUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
-  } else {
-    // Check if python3 is available for the 3MB zipapp
-    let hasPython = false;
-    try {
-      const py = spawnSync('python3', ['--version']);
-      hasPython = py.status === 0;
-    } catch (_) {}
-
-    if (!hasPython) {
-      // Standalone PyInstaller Linux binary (runs without python3)
-      downloadUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
-    }
   }
 
   await downloadFile(downloadUrl, binaryPath);

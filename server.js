@@ -183,18 +183,48 @@ async function downloadAudioToCache(videoId) {
       try {
         await runProcess(bin, fallbackArgs, 50000);
       } catch (fallbackErr) {
-        console.warn(`[AudioCache] Direct bestaudio failed: ${fallbackErr.message}.`);
-        if (ffmpegBinary) {
-          const ffmpegArgs = [
-            ...baseArgs,
-            '--ffmpeg-location', ffmpegBinary,
-            '-x', '--audio-format', 'mp3',
-            '-o', `${tempPrefix}.%(ext)s`,
-            ytUrl,
-          ];
-          await runProcess(bin, ffmpegArgs, 50000);
-        } else {
-          throw fallbackErr;
+        console.warn(`[AudioCache] Direct bestaudio failed: ${fallbackErr.message}. Trying Invidious fallback...`);
+        const invidiousPool = [
+          'https://invidious.f5.si',
+          'https://invidious.nerdvpn.de',
+          'https://yt.chocolatemoo53.com',
+          'https://inv.nadeko.net'
+        ];
+        for (const base of invidiousPool) {
+          try {
+            const ctrl = new AbortController();
+            const tid = setTimeout(() => ctrl.abort(), 6000);
+            const apiRes = await fetch(`${base}/api/v1/videos/${videoId}`, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+              signal: ctrl.signal
+            });
+            clearTimeout(tid);
+            if (apiRes.ok) {
+              const data = await apiRes.json();
+              const formats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
+              if (formats.length > 0) {
+                const best = formats.find(f => f.container === 'm4a') || formats[0];
+                const streamRes = await fetch(best.url, {
+                  headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+                });
+                if (streamRes.ok) {
+                  const targetExt = best.container || 'm4a';
+                  const targetFile = path.join(CACHE_DIR, `${videoId}.${targetExt}`);
+                  const fileStream = fs.createWriteStream(targetFile);
+                  const reader = streamRes.body.getReader();
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    fileStream.write(Buffer.from(value));
+                  }
+                  await new Promise(r => fileStream.end(r));
+                  if (fs.existsSync(targetFile) && fs.statSync(targetFile).size > 10000) {
+                    return targetFile;
+                  }
+                }
+              }
+            }
+          } catch (_) {}
         }
       }
     }
