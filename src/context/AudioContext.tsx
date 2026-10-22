@@ -6,6 +6,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { YoutubeService } from "../services/YoutubeService";
 import { webAudioStorage } from "../services/WebAudioStorage";
+import { webAudioPlayer } from "../services/WebAudioPlayer";
 
 export interface Song {
   id: string;
@@ -23,6 +24,16 @@ export interface CustomPlaylist {
   songIds: string[];
 }
 
+export interface DownloadTask {
+  id: string;
+  url: string;
+  title: string;
+  status: 'downloading' | 'completed' | 'error';
+  errorMessage?: string;
+  startedAt: number;
+  song?: Song;
+}
+
 type RepeatMode = "none" | "one" | "all";
 
 interface AudioContextType {
@@ -33,6 +44,10 @@ interface AudioContextType {
   playbackStatus: any;
   isShuffle: boolean;
   repeatMode: RepeatMode;
+  downloadTasks: DownloadTask[];
+  startBackgroundDownload: (url: string, customName?: string) => Promise<string>;
+  dismissDownloadTask: (id: string) => void;
+  retryDownloadTask: (id: string) => void;
   importSongs: (assets: any[]) => Promise<void>;
   downloadFromYoutube: (url: string, customName?: string) => Promise<{ success: boolean; message?: string; song?: Song }>;
   playSong: (song: Song, customQueue?: Song[]) => Promise<void>;
@@ -72,6 +87,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [isShuffle, setIsShuffle] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>("none");
   const [currentQueue, setCurrentQueue] = useState<Song[]>([]);
+  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
@@ -81,9 +97,26 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     stateRef.current = { repeatMode, isShuffle, currentQueue, playlist, currentSong };
   }, [repeatMode, isShuffle, currentQueue, playlist, currentSong]);
 
+  const actionsRef = useRef<any>({});
+
   useEffect(() => {
     loadData();
     setupAudio();
+
+    if (Platform.OS === 'web') {
+      webAudioPlayer.setOnSongEnded(() => {
+        handleSongFinished();
+      });
+
+      webAudioPlayer.setMediaSessionActions({
+        play: () => actionsRef.current.resumeSong?.(),
+        pause: () => actionsRef.current.pauseSong?.(),
+        next: () => actionsRef.current.nextSong?.(),
+        previous: () => actionsRef.current.previousSong?.(),
+        seek: (posMs: number) => actionsRef.current.seek?.(posMs),
+      });
+    }
+
     return () => {
       if (soundRef.current) {
         soundRef.current.unloadAsync().catch(() => {});
@@ -91,6 +124,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      webAudioPlayer.updateMediaMetadata(currentSong);
+    }
+  }, [currentSong]);
 
   const setupAudio = async () => {
     try {
@@ -303,14 +342,95 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         sourceUrl: url,
       };
 
-      const updatedPlaylist = [newSong, ...playlist];
-      setPlaylist(updatedPlaylist);
-      await savePlaylist(updatedPlaylist);
+      setPlaylist(prev => {
+        const updated = [newSong, ...prev.filter(s => s.id !== newSong.id)];
+        savePlaylist(updated);
+        return updated;
+      });
 
       return { success: true, song: newSong };
     } catch (err: any) {
       console.error("Error downloading from YouTube:", err);
       return { success: false, message: err?.message || "Failed to download audio from YouTube" };
+    }
+  };
+
+  const startBackgroundDownload = async (url: string, customName?: string): Promise<string> => {
+    const taskId = Math.random().toString(36).substr(2, 9);
+    const initialTitle = customName?.trim() || 'Downloading audio track...';
+
+    const newTask: DownloadTask = {
+      id: taskId,
+      url,
+      title: initialTitle,
+      status: 'downloading',
+      startedAt: Date.now(),
+    };
+
+    setDownloadTasks(prev => [newTask, ...prev]);
+
+    // Asynchronous background download so the UI remains 100% responsive
+    (async () => {
+      try {
+        const result = await downloadFromYoutube(url, customName);
+        if (result.success && result.song) {
+          const downloadedSong = result.song;
+          setDownloadTasks(prev =>
+            prev.map(t =>
+              t.id === taskId
+                ? {
+                    ...t,
+                    status: 'completed',
+                    song: downloadedSong,
+                    title: downloadedSong.name,
+                  }
+                : t
+            )
+          );
+          // Auto-dismiss completed banner after 7 seconds
+          setTimeout(() => {
+            setDownloadTasks(prev => prev.filter(t => t.id !== taskId));
+          }, 7000);
+        } else {
+          setDownloadTasks(prev =>
+            prev.map(t =>
+              t.id === taskId
+                ? {
+                    ...t,
+                    status: 'error',
+                    errorMessage: result.message || 'Download failed. Please check the URL or cookies.',
+                  }
+                : t
+            )
+          );
+        }
+      } catch (err: any) {
+        setDownloadTasks(prev =>
+          prev.map(t =>
+            t.id === taskId
+              ? {
+                  ...t,
+                  status: 'error',
+                  errorMessage: err?.message || 'Download failed.',
+                }
+              : t
+          )
+        );
+      }
+    })();
+
+    return taskId;
+  };
+
+  const dismissDownloadTask = (id: string) => {
+    setDownloadTasks(prev => prev.filter(t => t.id !== id));
+  };
+
+  const retryDownloadTask = (id: string) => {
+    const task = downloadTasks.find(t => t.id === id);
+    if (task) {
+      dismissDownloadTask(id);
+      startBackgroundDownload(task.url, task.title);
     }
   };
 
@@ -323,7 +443,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const { repeatMode } = stateRef.current;
     if (repeatMode === "one") {
       isHandlingFinishRef.current = false;
-      soundRef.current?.replayAsync().catch(() => {});
+      if (Platform.OS === 'web') {
+        webAudioPlayer.replay().catch(() => {});
+      } else {
+        soundRef.current?.replayAsync().catch(() => {});
+      }
     } else {
       internalNextSong();
     }
@@ -381,6 +505,90 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setCurrentSong(song);
       stateRef.current.currentSong = song;
 
+      // On Web: Always use webAudioPlayer to preserve the single persistent <audio> element
+      // and prevent mobile browser background/lock-screen autoplay restriction!
+      if (Platform.OS === 'web') {
+        let targetUri = song.uri;
+        if (!targetUri || (targetUri.startsWith('blob:') && !(await webAudioStorage.hasAudio(song.id)))) {
+          try {
+            const fresh = await webAudioStorage.getAudioUrl(song.id);
+            if (fresh) {
+              targetUri = fresh;
+              song.uri = fresh;
+            }
+          } catch (_) {}
+        }
+
+        const videoId = song.sourceUrl
+          ? YoutubeService.extractVideoId(song.sourceUrl)
+          : (song.source === 'youtube' ? YoutubeService.extractVideoId(song.uri) : null);
+
+        if (!targetUri && videoId) {
+          targetUri = YoutubeService.getProxyUrl(videoId);
+        }
+
+        webAudioPlayer.setOnPlaybackStatusUpdate((st) => {
+          onPlaybackStatusUpdate(st);
+        });
+
+        let usedProxyStreamUrl: string | null = null;
+        try {
+          await webAudioPlayer.loadAndPlay(targetUri, song);
+          if (targetUri && targetUri.includes('/api/proxy-audio')) {
+            usedProxyStreamUrl = targetUri;
+          }
+        } catch (playErr: any) {
+          console.warn('[WebAudioPlayer] Primary playback failed, trying candidate endpoints:', playErr?.message);
+          let recovered = false;
+          if (videoId) {
+            const candidates = YoutubeService.getCandidateProxyUrls(videoId);
+            for (const cand of candidates) {
+              try {
+                await webAudioPlayer.loadAndPlay(cand, song);
+                recovered = true;
+                usedProxyStreamUrl = cand;
+                break;
+              } catch (_) {}
+            }
+          }
+          if (!recovered) throw playErr;
+        }
+
+        if (usedProxyStreamUrl) {
+          fetch(usedProxyStreamUrl)
+            .then(r => r.blob())
+            .then(async b => {
+              if (b && b.size > 1000) {
+                const newUrl = await webAudioStorage.storeAudio(song.id, b);
+                song.uri = newUrl;
+              }
+            })
+            .catch(() => {});
+        }
+
+        const webSoundWrapper: any = {
+          unloadAsync: async () => webAudioPlayer.unload(),
+          pauseAsync: async () => webAudioPlayer.pause(),
+          playAsync: async () => webAudioPlayer.resume(),
+          replayAsync: async () => webAudioPlayer.replay(),
+          setPositionAsync: async (ms: number) => webAudioPlayer.seek(ms),
+          setStatusAsync: async (st: any) => {
+            if (st.positionMillis !== undefined) webAudioPlayer.seek(st.positionMillis);
+            if (st.shouldPlay === true) await webAudioPlayer.resume();
+            else if (st.shouldPlay === false) await webAudioPlayer.pause();
+          },
+          getStatusAsync: async () => webAudioPlayer.getStatus(),
+          setOnPlaybackStatusUpdate: (cb: any) => webAudioPlayer.setOnPlaybackStatusUpdate(cb),
+        };
+
+        soundRef.current = webSoundWrapper;
+        setSound(webSoundWrapper);
+        setIsPlaying(true);
+        isHandlingFinishRef.current = false;
+        return;
+      }
+
+      // Native platform (iOS/Android) Expo AV playback
       if (soundRef.current) {
         try {
           await soundRef.current.unloadAsync();
@@ -388,37 +596,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         soundRef.current = null;
       }
 
-      // Rehydrate URI on Web: blob: URLs from previous sessions expire upon page reload.
-      // Always attempt to get a fresh active blob URL from IndexedDB:
       let targetUri = song.uri;
-      if (Platform.OS === 'web') {
-        try {
-          const fresh = await webAudioStorage.getAudioUrl(song.id);
-          if (fresh) {
-            targetUri = fresh;
-            song.uri = fresh;
-          } else if (targetUri && targetUri.startsWith('blob:')) {
-            // Target is an expired blob from a past session not found in IndexedDB
-            targetUri = '';
-          }
-        } catch (_) {}
-      }
-
       const videoId = song.sourceUrl
         ? YoutubeService.extractVideoId(song.sourceUrl)
         : (song.source === 'youtube' ? YoutubeService.extractVideoId(song.uri) : null);
 
-      // On Web: if targetUri is empty or an expired blob URL, route directly to the proxy audio stream
-      if (Platform.OS === 'web' && (!targetUri || targetUri.startsWith('blob:')) && videoId) {
-        const hasOfflineBlob = await webAudioStorage.hasAudio(song.id);
-        if (!hasOfflineBlob) {
-          targetUri = YoutubeService.getProxyUrl(videoId);
-        }
-      }
-
       let newSound: Audio.Sound | null = null;
-      let usedProxyStreamUrl: string | null = null;
-
       try {
         const result = await Audio.Sound.createAsync(
           { uri: targetUri },
@@ -429,35 +612,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           throw new Error((result.status as any)?.error || 'Audio source failed to load');
         }
         newSound = result.sound;
-        if (targetUri.includes('/api/proxy-audio')) {
-          usedProxyStreamUrl = targetUri;
-        }
       } catch (playErr: any) {
-        console.warn(`[AudioContext] Primary playback failed for "${song.name}":`, playErr?.message);
-
-        // Fallback 1: Try fresh blob from IndexedDB if not already tried
-        let recovered = false;
-        if (Platform.OS === 'web') {
-          try {
-            const fresh = await webAudioStorage.getAudioUrl(song.id);
-            if (fresh && fresh !== targetUri) {
-              targetUri = fresh;
-              song.uri = fresh;
-              const retryResult = await Audio.Sound.createAsync(
-                { uri: targetUri },
-                { shouldPlay: true, progressUpdateIntervalMillis: 250 },
-                onPlaybackStatusUpdate
-              );
-              if (retryResult.status && retryResult.status.isLoaded) {
-                newSound = retryResult.sound;
-                recovered = true;
-              }
-            }
-          } catch (_) {}
-        }
-
-        // Fallback 2: Resilience recovery for YouTube tracks across all available backend endpoints!
-        if (!recovered && videoId) {
+        console.warn(`[AudioContext Native] Primary playback failed:`, playErr?.message);
+        if (videoId) {
           const candidates = YoutubeService.getCandidateProxyUrls(videoId);
           for (const candidate of candidates) {
             try {
@@ -468,53 +625,29 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               );
               if (fallbackResult.status && fallbackResult.status.isLoaded) {
                 newSound = fallbackResult.sound;
-                recovered = true;
-                usedProxyStreamUrl = candidate;
                 break;
               }
-            } catch (fallbackErr) {
-              console.warn('[AudioContext] Proxy endpoint candidate failed:', candidate);
-            }
+            } catch (_) {}
           }
         }
-
-        if (!recovered || !newSound) {
-          throw playErr;
-        }
-      }
-
-      if (!newSound) return;
-
-      // In the background, auto-repair the local cache with the clean MP3 if stream was used
-      if (Platform.OS === 'web' && usedProxyStreamUrl) {
-        fetch(usedProxyStreamUrl)
-          .then(r => r.blob())
-          .then(async b => {
-            if (b && b.size > 1000) {
-              const newUrl = await webAudioStorage.storeAudio(song.id, b);
-              song.uri = newUrl;
-            }
-          })
-          .catch(() => {});
-      }
-
-      // On Web, directly listen to HTMLMediaElement 'ended' event
-      if (Platform.OS === 'web' && (newSound as any)._key) {
-        const mediaElem = (newSound as any)._key as HTMLMediaElement;
-        mediaElem.onended = () => {
-          handleSongFinished();
-        };
+        if (!newSound) throw playErr;
       }
 
       soundRef.current = newSound;
       setSound(newSound);
       setIsPlaying(true);
+      isHandlingFinishRef.current = false;
     } catch (error) {
       console.error("Error playing song", error);
     }
   };
 
   const pauseSong = async () => {
+    if (Platform.OS === 'web') {
+      await webAudioPlayer.pause();
+      setIsPlaying(false);
+      return;
+    }
     if (soundRef.current) {
       await soundRef.current.pauseAsync().catch(() => {});
       setIsPlaying(false);
@@ -522,6 +655,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const resumeSong = async () => {
+    if (Platform.OS === 'web') {
+      await webAudioPlayer.resume();
+      setIsPlaying(true);
+      return;
+    }
     if (soundRef.current) {
       await soundRef.current.playAsync().catch(() => {});
       setIsPlaying(true);
@@ -567,11 +705,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       await saveCustomPlaylists(updatedCustom);
 
       if (currentSong?.id === id) {
-        if (soundRef.current) {
+        if (Platform.OS === 'web') {
+          await webAudioPlayer.unload();
+        } else if (soundRef.current) {
           await soundRef.current.unloadAsync().catch(() => {});
           soundRef.current = null;
-          setSound(null);
         }
+        setSound(null);
         setCurrentSong(null);
         setIsPlaying(false);
         setPlaybackStatus(null);
@@ -613,11 +753,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       await saveCustomPlaylists(updatedCustom);
 
       if (currentSong && ids.includes(currentSong.id)) {
-        if (soundRef.current) {
+        if (Platform.OS === 'web') {
+          await webAudioPlayer.unload();
+        } else if (soundRef.current) {
           await soundRef.current.unloadAsync().catch(() => {});
           soundRef.current = null;
-          setSound(null);
         }
+        setSound(null);
         setCurrentSong(null);
         setIsPlaying(false);
         setPlaybackStatus(null);
@@ -659,6 +801,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const seek = async (position: number) => {
     setPlaybackStatus((prev: any) => (prev ? { ...prev, positionMillis: position } : prev));
+    if (Platform.OS === 'web') {
+      await webAudioPlayer.seek(position);
+      return;
+    }
     if (soundRef.current) {
       await soundRef.current.setPositionAsync(position).catch(() => {});
     }
@@ -720,6 +866,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     playbackStatus,
     isShuffle,
     repeatMode,
+    downloadTasks,
+    startBackgroundDownload,
+    dismissDownloadTask,
+    retryDownloadTask,
     importSongs,
     downloadFromYoutube,
     playSong,
@@ -747,6 +897,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     isPlaying,
     isShuffle,
     repeatMode,
+    downloadTasks,
   ]);
 
   return (

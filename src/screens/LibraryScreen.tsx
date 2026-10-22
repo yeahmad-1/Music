@@ -3,6 +3,8 @@ import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform, PanRespo
 import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
 import { useAudio, Song } from '../context/AudioContext';
+import { YoutubeService } from '../services/YoutubeService';
+import { DownloadStatusBanner } from '../components/DownloadStatusBanner';
 
 const LibraryScreen = ({ navigation }: any) => {
   const {
@@ -10,6 +12,7 @@ const LibraryScreen = ({ navigation }: any) => {
     customPlaylists,
     importSongs,
     downloadFromYoutube,
+    startBackgroundDownload,
     playSong,
     deleteSong,
     deleteSongsBulk,
@@ -234,25 +237,20 @@ const LibraryScreen = ({ navigation }: any) => {
     }
   };
 
-  const handleDownloadYoutube = async () => {
-    if (!youtubeUrl.trim() || isDownloadingYt) return;
-    setIsDownloadingYt(true);
+  const handleDownloadYoutube = () => {
+    const url = youtubeUrl.trim();
+    const title = youtubeCustomTitle.trim();
+    if (!url) return;
+
+    // Instantly close the modal and reset inputs so the user can continue using the app
+    setIsYoutubeModalVisible(false);
+    setYoutubeUrl('');
+    setYoutubeCustomTitle('');
     setYtDownloadError(null);
-    try {
-      const result = await downloadFromYoutube(youtubeUrl.trim(), youtubeCustomTitle.trim() || undefined);
-      if (result.success) {
-        setIsYoutubeModalVisible(false);
-        setYoutubeUrl('');
-        setYoutubeCustomTitle('');
-        setActiveTab('recent');
-      } else {
-        setYtDownloadError(result.message || 'Download failed. Please check the URL.');
-      }
-    } catch (err: any) {
-      setYtDownloadError(err?.message || 'Download failed.');
-    } finally {
-      setIsDownloadingYt(false);
-    }
+    setActiveTab('recent');
+
+    // Launch background download task with floating progress notification
+    startBackgroundDownload(url, title || undefined);
   };
 
   const handleSaveCookies = async () => {
@@ -1282,17 +1280,15 @@ const LibraryScreen = ({ navigation }: any) => {
         <Dialog
           visible={isYoutubeModalVisible}
           onDismiss={() => {
-            if (!isDownloadingYt) {
-              setIsYoutubeModalVisible(false);
-              setYtDownloadError(null);
-            }
+            setIsYoutubeModalVisible(false);
+            setYtDownloadError(null);
           }}
           style={{ backgroundColor: theme.colors.surface }}
         >
           <Dialog.Title style={{ fontWeight: 'bold' }}>Download Audio from YouTube</Dialog.Title>
           <Dialog.Content>
             <Text variant="bodyMedium" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 14 }}>
-              Paste any YouTube song or track link to download its audio directly as an MP3 for offline listening.
+              Paste any YouTube song or track link. It will download as an MP3 in the background so you can continue using the app.
             </Text>
             <TextInput
               label="YouTube Music / Track Link"
@@ -1307,7 +1303,6 @@ const LibraryScreen = ({ navigation }: any) => {
               style={{ marginBottom: 12 }}
               autoCapitalize="none"
               autoCorrect={false}
-              disabled={isDownloadingYt}
             />
             <TextInput
               label="Custom Track Title (Optional)"
@@ -1317,57 +1312,7 @@ const LibraryScreen = ({ navigation }: any) => {
               mode="outlined"
               activeOutlineColor={theme.colors.primary}
               style={{ marginBottom: 12 }}
-              disabled={isDownloadingYt}
             />
-            {isDownloadingYt && (
-              <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 8 }}>
-                <ActivityIndicator animating={true} color={theme.colors.primary} size="small" style={{ marginRight: 10 }} />
-                <Text variant="bodySmall" style={{ color: theme.colors.primary, fontWeight: 'bold' }}>
-                  Extracting audio stream & downloading MP3...
-                </Text>
-              </View>
-            )}
-            {ytDownloadError && (
-              <View style={{ marginTop: 8, padding: 10, backgroundColor: 'rgba(211, 47, 47, 0.12)', borderRadius: 8 }}>
-                <Text variant="bodySmall" style={{ color: '#D32F2F', fontWeight: 'bold' }}>
-                  {ytDownloadError.includes('bot') || ytDownloadError.includes('cookies')
-                    ? 'YouTube blocked cloud server download (Bot Detection).'
-                    : ytDownloadError}
-                </Text>
-                {(ytDownloadError.includes('bot') || ytDownloadError.includes('cookies')) && (
-                  <View style={{ marginTop: 6 }}>
-                    <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 12, lineHeight: 16 }}>
-                      YouTube blocks automated cloud servers. To fix this:
-                    </Text>
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
-                      <Button
-                        mode="contained-tonal"
-                        compact
-                        onPress={() => setIsCookiesModalVisible(true)}
-                        icon="cookie"
-                      >
-                        Paste Cookies
-                      </Button>
-                      <Button
-                        mode="outlined"
-                        compact
-                        onPress={() => {
-                          if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                            window.open('https://cobalt.tools', '_blank');
-                          }
-                        }}
-                        icon="open-in-new"
-                      >
-                        Web Downloader
-                      </Button>
-                    </View>
-                    <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 11, marginTop: 6 }}>
-                      Or directly import any downloaded MP3 into your library using "+ Import Audio".
-                    </Text>
-                  </View>
-                )}
-              </View>
-            )}
           </Dialog.Content>
           <Dialog.Actions>
             <Button
@@ -1375,14 +1320,12 @@ const LibraryScreen = ({ navigation }: any) => {
                 setIsYoutubeModalVisible(false);
                 setYtDownloadError(null);
               }}
-              disabled={isDownloadingYt}
             >
               Cancel
             </Button>
             <Button
               onPress={handleDownloadYoutube}
-              loading={isDownloadingYt}
-              disabled={!youtubeUrl.trim() || isDownloadingYt}
+              disabled={!youtubeUrl.trim()}
               textColor="#FF0000"
               icon="download"
             >
@@ -1452,6 +1395,9 @@ const LibraryScreen = ({ navigation }: any) => {
           </Dialog.Actions>
         </Dialog>
       </Portal>
+
+      {/* Non-blocking background download banner */}
+      <DownloadStatusBanner />
     </View>
   );
 };

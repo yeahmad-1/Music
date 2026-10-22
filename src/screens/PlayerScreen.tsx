@@ -3,6 +3,7 @@ import { View, StyleSheet, Dimensions, Image, TouchableOpacity, Linking, PanResp
 import { IconButton, Text, Surface, useTheme } from 'react-native-paper';
 import { useAudio, usePlaybackStatus } from '../context/AudioContext';
 import { adService, WheelAdConfig } from '../services/AdService';
+import { DownloadStatusBanner } from '../components/DownloadStatusBanner';
 
 const { width } = Dimensions.get('window');
 
@@ -385,6 +386,8 @@ const PlayerScreen = () => {
           onPress={nextSong}
         />
       </View>
+
+      <DownloadStatusBanner />
     </View>
   );
 };
