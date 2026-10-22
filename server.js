@@ -47,6 +47,9 @@ const { ensureYtDlp } = require('./scripts/ensure-ytdlp');
 let ffmpegBinary = null;
 try {
   ffmpegBinary = require('ffmpeg-static');
+  if (ffmpegBinary && process.platform !== 'win32') {
+    try { fs.chmodSync(ffmpegBinary, 0o755); } catch (_) {}
+  }
 } catch (_) {}
 
 const CACHE_DIR = path.join(__dirname, 'audio_cache');
@@ -66,20 +69,26 @@ const activeDownloads = new Map();
 function runProcess(bin, args, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
     let stderr = '';
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill(); } catch (_) {}
-      reject(new Error(`Process timed out after ${timeoutMs / 1000}s`));
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      reject(new Error(`Process timed out after ${timeoutMs / 1000}s. Out: ${stdout.slice(-150)} | Err: ${stderr.slice(-150)}`));
     }, timeoutMs);
 
-    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.stdout.on('data', chunk => {
+      stdout = (stdout + chunk.toString()).slice(-20000);
+    });
+    proc.stderr.on('data', chunk => {
+      stderr = (stderr + chunk.toString()).slice(-20000);
+    });
     proc.on('close', code => {
       clearTimeout(timer);
       if (timedOut) return;
-      if (code === 0) resolve();
-      else reject(new Error(`Exit code ${code}: ${stderr.slice(-300)}`));
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`Exit code ${code}: ${(stderr || stdout).slice(-400)}`));
     });
     proc.on('error', err => {
       clearTimeout(timer);
@@ -91,7 +100,14 @@ function runProcess(bin, args, timeoutMs = 60000) {
 function serveAudioFile(filePath, req, res) {
   try {
     const ext = path.extname(filePath).toLowerCase();
-    const mimeType = ext === '.mp3' ? 'audio/mpeg' : ext === '.webm' ? 'audio/webm' : 'audio/mp4';
+    const mimeType =
+      ext === '.mp3' ? 'audio/mpeg' :
+      ext === '.m4a' ? 'audio/mp4' :
+      ext === '.mp4' ? 'audio/mp4' :
+      ext === '.webm' ? 'audio/webm' :
+      ext === '.ogg' || ext === '.opus' ? 'audio/ogg' :
+      ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
+
     const stats = fs.statSync(filePath);
     const fileSize = stats.size;
     const range = req.headers.range;
@@ -135,14 +151,14 @@ function serveAudioFile(filePath, req, res) {
     }
   } catch (err) {
     if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Error serving audio: ' + err.message);
     }
   }
 }
 
 async function downloadAudioToCache(videoId) {
-  for (const ext of ['.mp3', '.m4a', '.mp4', '.webm']) {
+  for (const ext of ['.mp3', '.m4a', '.mp4', '.webm', '.opus', '.ogg', '.wav']) {
     const p = path.join(CACHE_DIR, `${videoId}${ext}`);
     if (fs.existsSync(p) && fs.statSync(p).size > 10000) {
       return p;
@@ -163,79 +179,121 @@ async function downloadAudioToCache(videoId) {
     const baseArgs = [
       ...(fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : []),
       '--no-check-certificates',
-      '--socket-timeout', '15',
+      '--socket-timeout', '20',
       '--no-playlist',
+      '--no-progress',
+      '--js-runtimes', 'node',
     ];
 
-    // Primary: Android client with format ba/b/18 (never blocked on cloud datacenter IPs, no ffmpeg required!)
-    const androidArgs = [
-      ...baseArgs,
-      '--extractor-args', 'youtube:player_client=android',
-      '-f', 'ba/b/18',
-      '-o', `${tempPrefix}.%(ext)s`,
-      ytUrl,
-    ];
+    let lastError = null;
 
-    try {
-      await runProcess(bin, androidArgs, 50000);
-    } catch (androidErr) {
-      console.warn(`[AudioCache] Android client attempt failed: ${androidErr.message}. Trying direct bestaudio...`);
-      const fallbackArgs = [
+    // Attempt 1: Standard high-quality MP3 conversion via ffmpeg
+    if (ffmpegBinary) {
+      const mp3Args = [
         ...baseArgs,
+        '--ffmpeg-location', ffmpegBinary,
+        '-x', '--audio-format', 'mp3',
+        '--extractor-args', 'youtube:player_client=android,ios,visionos,web,tv',
+        '-o', `${tempPrefix}.%(ext)s`,
+        ytUrl,
+      ];
+      try {
+        console.log(`[AudioCache] Attempting MP3 extraction with ffmpeg for ${videoId}...`);
+        await runProcess(bin, mp3Args, 60000);
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AudioCache] Attempt 1 (ffmpeg mp3) failed: ${err.message}`);
+      }
+    }
+
+    // Attempt 2: Direct stream extraction (format 18 / bestaudio) without ffmpeg
+    let existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+    if (existingFiles.length === 0) {
+      const directArgs = [
+        ...baseArgs,
+        '--extractor-args', 'youtube:player_client=android,tv,web,ios',
         '-f', 'ba/b/18',
         '-o', `${tempPrefix}.%(ext)s`,
         ytUrl,
       ];
       try {
-        await runProcess(bin, fallbackArgs, 50000);
-      } catch (fallbackErr) {
-        console.warn(`[AudioCache] Direct bestaudio failed: ${fallbackErr.message}. Trying Invidious fallback...`);
-        const invidiousPool = [
-          'https://invidious.f5.si',
-          'https://invidious.nerdvpn.de',
-          'https://yt.chocolatemoo53.com',
-          'https://inv.nadeko.net'
-        ];
-        for (const base of invidiousPool) {
-          try {
-            const ctrl = new AbortController();
-            const tid = setTimeout(() => ctrl.abort(), 6000);
-            const apiRes = await fetch(`${base}/api/v1/videos/${videoId}`, {
-              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-              signal: ctrl.signal
-            });
-            clearTimeout(tid);
-            if (apiRes.ok) {
-              const data = await apiRes.json();
-              const formats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
-              if (formats.length > 0) {
-                const best = formats.find(f => f.container === 'm4a') || formats[0];
-                const streamRes = await fetch(best.url, {
-                  headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-                });
-                if (streamRes.ok) {
-                  const targetExt = best.container || 'm4a';
-                  const targetFile = path.join(CACHE_DIR, `${videoId}.${targetExt}`);
-                  const fileStream = fs.createWriteStream(targetFile);
-                  const reader = streamRes.body.getReader();
-                  while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    fileStream.write(Buffer.from(value));
-                  }
-                  await new Promise(r => fileStream.end(r));
-                  if (fs.existsSync(targetFile) && fs.statSync(targetFile).size > 10000) {
-                    return targetFile;
-                  }
-                }
-              }
-            }
-          } catch (_) {}
-        }
+        console.log(`[AudioCache] Attempting direct audio stream download for ${videoId}...`);
+        await runProcess(bin, directArgs, 60000);
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AudioCache] Attempt 2 (direct stream) failed: ${err.message}`);
       }
     }
 
-    const files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+    // Attempt 3: General fallback bestaudio
+    existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+    if (existingFiles.length === 0) {
+      const fallbackArgs = [
+        ...baseArgs,
+        '-f', 'ba/b',
+        '-o', `${tempPrefix}.%(ext)s`,
+        ytUrl,
+      ];
+      try {
+        console.log(`[AudioCache] Attempting fallback bestaudio for ${videoId}...`);
+        await runProcess(bin, fallbackArgs, 60000);
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AudioCache] Attempt 3 (fallback) failed: ${err.message}`);
+      }
+    }
+
+    // Check if any file was downloaded
+    let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+
+    // Attempt 4: Invidious API fallback
+    if (files.length === 0) {
+      console.warn(`[AudioCache] yt-dlp attempts failed. Trying Invidious API fallback for ${videoId}...`);
+      const invidiousPool = [
+        'https://invidious.nerdvpn.de',
+        'https://invidious.f5.si',
+        'https://yt.chocolatemoo53.com',
+        'https://inv.nadeko.net'
+      ];
+      for (const base of invidiousPool) {
+        try {
+          const ctrl = new AbortController();
+          const tid = setTimeout(() => ctrl.abort(), 8000);
+          const apiRes = await fetch(`${base}/api/v1/videos/${videoId}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            signal: ctrl.signal
+          });
+          clearTimeout(tid);
+          if (apiRes.ok) {
+            const data = await apiRes.json();
+            const formats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
+            if (formats.length > 0) {
+              const best = formats.find(f => f.container === 'm4a') || formats[0];
+              const streamRes = await fetch(best.url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+              });
+              if (streamRes.ok) {
+                const targetExt = best.container || 'm4a';
+                const targetFile = path.join(CACHE_DIR, `${videoId}.${targetExt}`);
+                const fileStream = fs.createWriteStream(targetFile);
+                const reader = streamRes.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  fileStream.write(Buffer.from(value));
+                }
+                await new Promise(r => fileStream.end(r));
+                if (fs.existsSync(targetFile) && fs.statSync(targetFile).size > 10000) {
+                  return targetFile;
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
     if (files.length > 0) {
       const generated = path.join(CACHE_DIR, files[0]);
       const ext = path.extname(generated).toLowerCase();
@@ -244,10 +302,35 @@ async function downloadAudioToCache(videoId) {
         try { fs.unlinkSync(targetFile); } catch (_) {}
       }
       fs.renameSync(generated, targetFile);
+
+      // If downloaded format is not MP3 and ffmpeg is available, convert it to clean standard MP3
+      if (ext !== '.mp3' && ffmpegBinary) {
+        const mp3Target = path.join(CACHE_DIR, `${videoId}.mp3`);
+        try {
+          await runProcess(ffmpegBinary, [
+            '-y',
+            '-i', targetFile,
+            '-vn',
+            '-acodec', 'libmp3lame',
+            '-q:a', '2',
+            mp3Target
+          ], 30000);
+          if (fs.existsSync(mp3Target) && fs.statSync(mp3Target).size > 10000) {
+            try { fs.unlinkSync(targetFile); } catch (_) {}
+            return mp3Target;
+          }
+        } catch (convErr) {
+          console.warn('[AudioCache] Background MP3 conversion failed, serving original format:', convErr.message);
+        }
+      }
+
       return targetFile;
     }
 
-    throw new Error('Downloaded audio file not found on disk');
+    throw new Error(
+      lastError?.message ||
+      'Audio download failed: YouTube blocked access or video is unavailable. Please verify the link or try importing audio directly.'
+    );
   })();
 
   activeDownloads.set(videoId, downloadPromise);
@@ -409,18 +492,20 @@ const server = http.createServer(async (req, res) => {
     const genericStreamUrl = reqUrl.searchParams.get('url');
 
     if (videoId) {
-      const cachedFilePath = path.join(CACHE_DIR, `${videoId}.mp3`);
-      if (fs.existsSync(cachedFilePath) && fs.statSync(cachedFilePath).size > 5000) {
-        return serveAudioFile(cachedFilePath, req, res, 'audio/mpeg');
+      for (const ext of ['.mp3', '.m4a', '.mp4', '.webm', '.opus', '.ogg', '.wav']) {
+        const cachedFilePath = path.join(CACHE_DIR, `${videoId}${ext}`);
+        if (fs.existsSync(cachedFilePath) && fs.statSync(cachedFilePath).size > 5000) {
+          return serveAudioFile(cachedFilePath, req, res);
+        }
       }
 
       try {
         const filePath = await downloadAudioToCache(videoId);
-        return serveAudioFile(filePath, req, res, 'audio/mpeg');
+        return serveAudioFile(filePath, req, res);
       } catch (err) {
         console.error(`[AudioProxy] Failed to fetch/convert audio for ${videoId}:`, err.message);
         if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end(`Audio stream extraction failed: ${err.message}`);
         }
         return;

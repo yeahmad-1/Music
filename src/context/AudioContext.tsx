@@ -252,7 +252,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (Platform.OS === 'web') {
         // In browser: download stream into Blob and store in IndexedDB
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000);
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
         let response: Response;
         try {
           response = await fetch(audioInfo.streamUrl, { signal: controller.signal });
@@ -266,16 +266,21 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         if (!response.ok) {
-          throw new Error(`Download failed with HTTP status ${response.status}`);
+          const errText = await response.text().catch(() => '');
+          throw new Error(errText || `Download failed with HTTP status ${response.status}`);
         }
         const blob = await response.blob();
-        // Ensure explicit audio/mpeg MIME type for standard MP3 playback & exact duration
-        const mp3Blob = new Blob([blob], { type: 'audio/mpeg' });
+        if (blob.size < 1000) {
+          throw new Error('Downloaded audio stream is empty or invalid.');
+        }
+
+        const mime = response.headers.get('content-type') || blob.type || 'audio/mpeg';
+        const properBlob = new Blob([blob], { type: mime });
         try {
-          destinationUri = await webAudioStorage.storeAudio(id, mp3Blob);
+          destinationUri = await webAudioStorage.storeAudio(id, properBlob);
         } catch {
           // If IndexedDB storage fails, fall back to in-memory blob URL
-          destinationUri = URL.createObjectURL(mp3Blob);
+          destinationUri = URL.createObjectURL(properBlob);
         }
       } else {
         const fileName = `yt_${Date.now()}_${sanitizedName}.mp3`;
@@ -392,6 +397,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           if (fresh) {
             targetUri = fresh;
             song.uri = fresh;
+          } else if (targetUri && targetUri.startsWith('blob:')) {
+            // Target is an expired blob from a past session not found in IndexedDB
+            targetUri = '';
           }
         } catch (_) {}
       }
@@ -400,11 +408,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ? YoutubeService.extractVideoId(song.sourceUrl)
         : (song.source === 'youtube' ? YoutubeService.extractVideoId(song.uri) : null);
 
-      // On Web: if targetUri is an expired blob URL not present in IndexedDB,
-      // avoid dead blob stall by routing directly to the proxy audio stream
-      if (Platform.OS === 'web' && targetUri && targetUri.startsWith('blob:')) {
+      // On Web: if targetUri is empty or an expired blob URL, route directly to the proxy audio stream
+      if (Platform.OS === 'web' && (!targetUri || targetUri.startsWith('blob:')) && videoId) {
         const hasOfflineBlob = await webAudioStorage.hasAudio(song.id);
-        if (!hasOfflineBlob && videoId) {
+        if (!hasOfflineBlob) {
           targetUri = YoutubeService.getProxyUrl(videoId);
         }
       }
@@ -482,8 +489,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (Platform.OS === 'web' && usedProxyStreamUrl) {
         fetch(usedProxyStreamUrl)
           .then(r => r.blob())
-          .then(b => webAudioStorage.storeAudio(song.id, b))
-          .then(newUrl => { song.uri = newUrl; })
+          .then(async b => {
+            if (b && b.size > 1000) {
+              const newUrl = await webAudioStorage.storeAudio(song.id, b);
+              song.uri = newUrl;
+            }
+          })
           .catch(() => {});
       }
 

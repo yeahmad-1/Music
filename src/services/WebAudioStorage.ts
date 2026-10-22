@@ -5,6 +5,41 @@
  * On native platforms (iOS/Android), FileSystem is used instead.
  */
 
+function detectAudioMimeType(buffer: ArrayBuffer, fallback = 'audio/mpeg'): string {
+  if (!buffer || buffer.byteLength < 4) return fallback;
+  const u8 = new Uint8Array(buffer.slice(0, 16));
+
+  // MP4 / M4A / AAC container: contains 'ftyp' at offset 4
+  if (u8.length >= 8 && u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) {
+    return 'audio/mp4';
+  }
+  // WebM / Matroska: 0x1A 0x45 0xDF 0xA3
+  if (u8.length >= 4 && u8[0] === 0x1a && u8[1] === 0x45 && u8[2] === 0xdf && u8[3] === 0xa3) {
+    return 'audio/webm';
+  }
+  // OGG: 'OggS'
+  if (u8.length >= 4 && u8[0] === 0x4f && u8[1] === 0x67 && u8[2] === 0x67 && u8[3] === 0x53) {
+    return 'audio/ogg';
+  }
+  // WAV: 'RIFF'
+  if (u8.length >= 4 && u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46) {
+    return 'audio/wav';
+  }
+  // AAC ADTS: 0xFF 0xF1 or 0xFF 0xF9
+  if (u8.length >= 2 && u8[0] === 0xff && (u8[1] & 0xf6) === 0xf0) {
+    return 'audio/aac';
+  }
+  // MP3: 'ID3' or MPEG frame sync (0xFF 0xE0+)
+  if (u8.length >= 3 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) {
+    return 'audio/mpeg';
+  }
+  if (u8.length >= 2 && u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0) {
+    return 'audio/mpeg';
+  }
+
+  return fallback;
+}
+
 class WebAudioStorage {
   private dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -49,15 +84,16 @@ class WebAudioStorage {
     try {
       const db = await this.getDB();
       let buffer: ArrayBuffer;
-      let mimeType = 'audio/mpeg';
+      let hintMime = 'audio/mpeg';
 
       if (data instanceof Blob) {
-        mimeType = data.type || 'audio/mpeg';
+        hintMime = data.type || 'audio/mpeg';
         buffer = await data.arrayBuffer();
       } else {
         buffer = data;
       }
 
+      const mimeType = detectAudioMimeType(buffer, hintMime);
       const blob = new Blob([buffer], { type: mimeType });
 
       return new Promise((resolve, reject) => {
@@ -107,9 +143,11 @@ class WebAudioStorage {
 
           let blob: Blob | null = null;
 
-          // Format 1: New universal ArrayBuffer format
+          // Format 1: Universal ArrayBuffer format (most robust across all browsers)
           if (res.buffer && (res.buffer instanceof ArrayBuffer || ArrayBuffer.isView(res.buffer))) {
-            blob = new Blob([res.buffer], { type: res.type || 'audio/mpeg' });
+            const rawBuf: ArrayBuffer = res.buffer instanceof ArrayBuffer ? res.buffer : res.buffer.buffer;
+            const properMime = detectAudioMimeType(rawBuf, res.type || 'audio/mpeg');
+            blob = new Blob([rawBuf], { type: properMime });
           }
           // Format 2: Direct Blob object
           else if (res.blob instanceof Blob) {
@@ -121,7 +159,9 @@ class WebAudioStorage {
           else if (res.data instanceof Blob) {
             blob = res.data;
           } else if (res.data && (res.data instanceof ArrayBuffer || ArrayBuffer.isView(res.data))) {
-            blob = new Blob([res.data], { type: res.type || 'audio/mpeg' });
+            const rawBuf: ArrayBuffer = res.data instanceof ArrayBuffer ? res.data : res.data.buffer;
+            const properMime = detectAudioMimeType(rawBuf, res.type || 'audio/mpeg');
+            blob = new Blob([rawBuf], { type: properMime });
           }
 
           if (blob && blob.size > 0) {
