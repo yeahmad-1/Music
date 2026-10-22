@@ -566,16 +566,36 @@ const server = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
     const start = Date.now();
+    const pollLogs = [];
     try {
-      const resPath = await downloadViaLoader(videoId);
-      const exists = resPath && fs.existsSync(resPath);
-      const size = exists ? fs.statSync(resPath).size : 0;
+      const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(10000)
+      });
+      const data = await initRes.json();
+      const html = Buffer.from(data.content, 'base64').toString();
+      const matchId = html.match(/id="(card-v2_stream_[^"]+|v2_stream_[^"]+_progress)"/);
+      const streamId = matchId ? matchId[1].replace('card-', '').replace('_progress', '') : null;
+
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const progRes = await fetch(`https://loader.to/ajax/progress.php?id=${streamId}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+          signal: AbortSignal.timeout(8000)
+        });
+        const prog = await progRes.json().catch(() => null);
+        pollLogs.push({ i, prog });
+        if (prog && prog.success === 1 && prog.download_url) {
+          break;
+        }
+      }
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         success: true,
-        resPath,
-        exists,
-        size,
+        streamId,
+        pollLogs,
         timeTakenSec: (Date.now() - start) / 1000
       }));
     } catch (err) {
@@ -583,6 +603,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({
         success: false,
         error: err.message,
+        pollLogs,
         timeTakenSec: (Date.now() - start) / 1000
       }));
     }
