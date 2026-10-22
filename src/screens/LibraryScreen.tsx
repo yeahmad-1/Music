@@ -1,4 +1,4 @@
-import React, { useState, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { View, FlatList, StyleSheet, TouchableOpacity, Image, Platform, PanResponder } from 'react-native';
 import { List, IconButton, Text, Divider, Searchbar, useTheme, SegmentedButtons, Menu, Appbar, Dialog, Portal, TextInput, Button, ActivityIndicator } from 'react-native-paper';
 import * as DocumentPicker from 'expo-document-picker';
