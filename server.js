@@ -157,6 +157,66 @@ function serveAudioFile(filePath, req, res) {
   }
 }
 
+async function downloadViaLoader(videoId) {
+  try {
+    console.log(`[AudioCache] Attempting cloud MP3 resolver for ${videoId}...`);
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const initRes = await fetch(`https://loader.to/ajax/download.php?button=1&start=1&end=1&format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!initRes.ok) return null;
+    const data = await initRes.json();
+    if (!data.content) return null;
+    const html = Buffer.from(data.content, 'base64').toString();
+    const matchId = html.match(/id="(card-v2_stream_[^"]+|v2_stream_[^"]+_progress)"/);
+    if (!matchId) return null;
+    const streamId = matchId[1].replace('card-', '').replace('_progress', '');
+
+    // Poll progress up to 15 times (~25 seconds)
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const progRes = await fetch(`https://loader.to/ajax/progress.php?id=${streamId}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (progRes.ok) {
+        const prog = await progRes.json();
+        if (prog.success === 1 && prog.download_url) {
+          console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}! Streaming audio...`);
+          const streamRes = await fetch(prog.download_url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            signal: AbortSignal.timeout(60000)
+          });
+          if (streamRes.ok) {
+            const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
+            const tempFile = `${targetFile}.tmp-${Date.now()}`;
+            const fileStream = fs.createWriteStream(tempFile);
+            const reader = streamRes.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              fileStream.write(Buffer.from(value));
+            }
+            await new Promise(r => fileStream.end(r));
+            if (fs.existsSync(tempFile) && fs.statSync(tempFile).size > 10000) {
+              if (fs.existsSync(targetFile)) {
+                try { fs.unlinkSync(targetFile); } catch (_) {}
+              }
+              fs.renameSync(tempFile, targetFile);
+              console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(fs.statSync(targetFile).size / 1024 / 1024).toFixed(2)} MB)`);
+              return targetFile;
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[AudioCache] Cloud resolver error for ${videoId}:`, err.message);
+  }
+  return null;
+}
+
 async function downloadAudioToCache(videoId) {
   for (const ext of ['.mp3', '.m4a', '.mp4', '.webm', '.opus', '.ogg', '.wav']) {
     const p = path.join(CACHE_DIR, `${videoId}${ext}`);
@@ -270,7 +330,16 @@ async function downloadAudioToCache(videoId) {
     // Check if any file was downloaded
     let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
 
-    // Attempt Invidious API fallback if all yt-dlp strategies failed
+    // Fallback 1: High-Speed Cloud MP3 Resolver (bypasses YouTube datacenter bot detection)
+    if (files.length === 0) {
+      console.log(`[AudioCache] yt-dlp local strategies failed for ${videoId}. Trying cloud MP3 resolver...`);
+      const loaderFile = await downloadViaLoader(videoId);
+      if (loaderFile && fs.existsSync(loaderFile) && fs.statSync(loaderFile).size > 10000) {
+        return loaderFile;
+      }
+    }
+
+    // Fallback 2: Invidious API fallback
     if (files.length === 0) {
       console.warn(`[AudioCache] yt-dlp strategies failed for ${videoId}. Trying Invidious API fallback...`);
       const invidiousPool = [
@@ -558,6 +627,8 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({
         success: false,
         hasCookies,
+        execPath: process.execPath,
+        envPath: process.env.PATH,
         error: err.message,
       }));
     }
