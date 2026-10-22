@@ -370,6 +370,36 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // API: Debug diagnostics for Render runtime
+  if (req.url === '/api/debug') {
+    const bin = await getYtDlp();
+    const isWin = process.platform === 'win32';
+    const binaryName = isWin ? 'yt-dlp.exe' : 'yt-dlp';
+    const binaryPath = path.join(__dirname, 'bin', binaryName);
+    const binExists = fs.existsSync(binaryPath);
+    let binStats = null;
+    if (binExists) binStats = fs.statSync(binaryPath);
+    const versionTest = bin ? spawnSync(bin, ['--version'], { encoding: 'utf8' }) : null;
+    const testVideo = bin ? spawnSync(bin, [
+      '--extractor-args', 'youtube:player_client=android',
+      '-f', 'ba/b/18',
+      '--no-playlist',
+      '--simulate',
+      '--print', '%(format_id)s %(acodec)s',
+      'https://www.youtube.com/watch?v=Qu4RQOQaImk'
+    ], { encoding: 'utf8', timeout: 15000 }) : null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      platform: process.platform,
+      arch: process.arch,
+      bin,
+      binExists,
+      binSize: binStats ? binStats.size : 0,
+      version: versionTest ? { status: versionTest.status, stdout: versionTest.stdout, stderr: versionTest.stderr } : null,
+      testVideo: testVideo ? { status: testVideo.status, stdout: testVideo.stdout, stderr: testVideo.stderr } : null
+    }, null, 2));
+  }
+
   // API: YouTube Resolver (Node backend, zero CORS issues!)
   if (req.url.startsWith('/api/youtube')) {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
