@@ -83,8 +83,10 @@ function runProcess(bin, args, timeoutMs = 60000) {
   });
 }
 
-function serveAudioFile(filePath, req, res, mimeType = 'audio/mpeg') {
+function serveAudioFile(filePath, req, res) {
   try {
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeType = ext === '.mp3' ? 'audio/mpeg' : ext === '.webm' ? 'audio/webm' : 'audio/mp4';
     const stats = fs.statSync(filePath);
     const fileSize = stats.size;
     const range = req.headers.range;
@@ -135,9 +137,11 @@ function serveAudioFile(filePath, req, res, mimeType = 'audio/mpeg') {
 }
 
 async function downloadAudioToCache(videoId) {
-  const cachedFilePath = path.join(CACHE_DIR, `${videoId}.mp3`);
-  if (fs.existsSync(cachedFilePath) && fs.statSync(cachedFilePath).size > 10000) {
-    return cachedFilePath;
+  for (const ext of ['.mp3', '.m4a', '.mp4', '.webm']) {
+    const p = path.join(CACHE_DIR, `${videoId}${ext}`);
+    if (fs.existsSync(p) && fs.statSync(p).size > 10000) {
+      return p;
+    }
   }
 
   if (activeDownloads.has(videoId)) {
@@ -153,71 +157,58 @@ async function downloadAudioToCache(videoId) {
 
     const baseArgs = [
       '--no-check-certificates',
-      '--socket-timeout', '10',
+      '--socket-timeout', '15',
       '--no-playlist',
-      '--js-runtimes', 'node',
     ];
 
-    if (ffmpegBinary) {
-      baseArgs.push('--ffmpeg-location', ffmpegBinary);
-    }
-
-    // Primary: Convert to true MP3 with exact duration & ID3 tags (solves extra minutes bug!)
-    const primaryArgs = [
+    // Primary: Android client with format ba/b/18 (never blocked on cloud datacenter IPs, no ffmpeg required!)
+    const androidArgs = [
       ...baseArgs,
-      '-x',
-      '--audio-format', 'mp3',
-      '--audio-quality', '5',
+      '--extractor-args', 'youtube:player_client=android',
+      '-f', 'ba/b/18',
       '-o', `${tempPrefix}.%(ext)s`,
       ytUrl,
     ];
 
     try {
-      await runProcess(bin, primaryArgs);
-    } catch (err) {
-      console.warn(`[AudioCache] Primary download failed: ${err.message}. Trying android client fallback...`);
+      await runProcess(bin, androidArgs, 50000);
+    } catch (androidErr) {
+      console.warn(`[AudioCache] Android client attempt failed: ${androidErr.message}. Trying direct bestaudio...`);
       const fallbackArgs = [
         ...baseArgs,
-        '--extractor-args', 'youtube:player_client=android,web',
-        '-x',
-        '--audio-format', 'mp3',
-        '--audio-quality', '5',
+        '-f', 'ba/b/18',
         '-o', `${tempPrefix}.%(ext)s`,
         ytUrl,
       ];
       try {
-        await runProcess(bin, fallbackArgs);
+        await runProcess(bin, fallbackArgs, 50000);
       } catch (fallbackErr) {
-        console.warn(`[AudioCache] Android fallback failed: ${fallbackErr.message}. Trying direct format 140/ba...`);
-        const rawArgs = [
-          ...baseArgs,
-          '-f', '140/ba[ext=m4a]/ba/b',
-          '-o', `${tempPrefix}.%(ext)s`,
-          ytUrl,
-        ];
-        await runProcess(bin, rawArgs);
+        console.warn(`[AudioCache] Direct bestaudio failed: ${fallbackErr.message}.`);
+        if (ffmpegBinary) {
+          const ffmpegArgs = [
+            ...baseArgs,
+            '--ffmpeg-location', ffmpegBinary,
+            '-x', '--audio-format', 'mp3',
+            '-o', `${tempPrefix}.%(ext)s`,
+            ytUrl,
+          ];
+          await runProcess(bin, ffmpegArgs, 50000);
+        } else {
+          throw fallbackErr;
+        }
       }
-    }
-
-    const expectedMp3 = `${tempPrefix}.mp3`;
-    if (fs.existsSync(expectedMp3) && fs.statSync(expectedMp3).size > 5000) {
-      try {
-        if (fs.existsSync(cachedFilePath)) fs.unlinkSync(cachedFilePath);
-      } catch (_) {}
-      fs.renameSync(expectedMp3, cachedFilePath);
-      return cachedFilePath;
     }
 
     const files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
     if (files.length > 0) {
       const generated = path.join(CACHE_DIR, files[0]);
-      if (fs.statSync(generated).size > 5000) {
-        if (fs.existsSync(cachedFilePath)) {
-          try { fs.unlinkSync(cachedFilePath); } catch (_) {}
-        }
-        fs.renameSync(generated, cachedFilePath);
-        return cachedFilePath;
+      const ext = path.extname(generated).toLowerCase();
+      const targetFile = path.join(CACHE_DIR, `${videoId}${ext}`);
+      if (fs.existsSync(targetFile)) {
+        try { fs.unlinkSync(targetFile); } catch (_) {}
       }
+      fs.renameSync(generated, targetFile);
+      return targetFile;
     }
 
     throw new Error('Downloaded audio file not found on disk');
