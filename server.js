@@ -178,8 +178,8 @@ async function downloadViaLoader(videoId) {
       const streamId = matchId[1].replace('card-', '').replace('_progress', '');
       console.log(`[AudioCache] Cloud streamId for ${videoId}: ${streamId}`);
 
-      // Poll progress up to 22 times (~26 seconds)
-      for (let i = 0; i < 22; i++) {
+      // Poll progress up to 30 times (~36 seconds)
+      for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 1200));
         const progRes = await fetch(`${host}/ajax/progress.php?id=${streamId}`, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -189,7 +189,8 @@ async function downloadViaLoader(videoId) {
         const prog = await progRes.json().catch(() => null);
         if (!prog) continue;
 
-        if (prog.success === 1 && prog.download_url) {
+        const isFinished = (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url;
+        if (isFinished) {
           console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}! Downloading audio...`);
           const streamRes = await fetch(prog.download_url, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -596,7 +597,7 @@ const server = http.createServer(async (req, res) => {
       const matchId = html.match(/id="([^"]+)"/);
       const streamId = matchId ? matchId[1].replace('card-', '').replace('_progress', '') : null;
 
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 25; i++) {
         await new Promise(r => setTimeout(r, 1200));
         const progRes = await fetch(`https://p.savenow.to/ajax/progress.php?id=${streamId}`, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -604,7 +605,7 @@ const server = http.createServer(async (req, res) => {
         });
         const prog = await progRes.json().catch(() => null);
         pollLogs.push({ i, prog });
-        if (prog && prog.success === 1 && prog.download_url) {
+        if (prog && (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url) {
           break;
         }
       }
