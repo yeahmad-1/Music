@@ -24,7 +24,29 @@
         flex: 1;
       }
     </style>
-  <link rel="icon" href="/favicon.ico" /></head>
+  <link rel="icon" href="/favicon.ico" />
+    <script id="filter-console-logs">
+      (function() {
+        var origWarn = console.warn;
+        console.warn = function() {
+          if (arguments[0] && typeof arguments[0] === 'string' && arguments[0].indexOf('Expo AV has been deprecated') !== -1) {
+            return;
+          }
+          return origWarn.apply(console, arguments);
+        };
+        var origError = console.error;
+        console.error = function() {
+          if (arguments[0] && typeof arguments[0] === 'string' && (
+            arguments[0].indexOf('Cannot record touch end without a touch start') !== -1 ||
+            arguments[0].indexOf('Cannot record touch move without a touch start') !== -1
+          )) {
+            return;
+          }
+          return origError.apply(console, arguments);
+        };
+      })();
+    </script>
+  </head>
 
   <body>
     <!-- Use static rendering with Expo Router to support running without JavaScript. -->
@@ -33,6 +55,6 @@
     </noscript>
     <!-- The root element for your Expo app. -->
     <div id="root"></div>
-  <script src="/_expo/static/js/web/index-c7dcbe21f79c2b4cb6bf81c8c63e6d6b.js" defer></script>
+  <script src="/_expo/static/js/web/index-ac41467262655fdc425dbc808dff7202.js" defer></script>
 </body>
 </html>

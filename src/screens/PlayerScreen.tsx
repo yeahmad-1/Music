@@ -96,6 +96,12 @@ const PlayerScreen = () => {
       }
     };
 
+    if (e.stopPropagation) {
+      try {
+        e.stopPropagation();
+      } catch (_) {}
+    }
+
     if (e.preventDefault) {
       try {
         e.preventDefault();
@@ -289,7 +295,7 @@ const PlayerScreen = () => {
               });
             }
           }}
-          {...panResponder.panHandlers}
+          {...(Platform.OS !== 'web' ? panResponder.panHandlers : {})}
           {...(Platform.OS === 'web' ? { onPointerDown: handlePointerDown } : ({} as any))}
         >
           {/* Background Track */}

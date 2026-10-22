@@ -28,6 +28,34 @@ if (fs.existsSync(htmlPath)) {
     );
   }
 
+  // Inject console warning/error filter into <head> so deprecated warnings & responder touch errors never pollute DevTools
+  if (!content.includes('filter-console-logs')) {
+    const filterScript = `
+    <script id="filter-console-logs">
+      (function() {
+        var origWarn = console.warn;
+        console.warn = function() {
+          if (arguments[0] && typeof arguments[0] === 'string' && arguments[0].indexOf('Expo AV has been deprecated') !== -1) {
+            return;
+          }
+          return origWarn.apply(console, arguments);
+        };
+        var origError = console.error;
+        console.error = function() {
+          if (arguments[0] && typeof arguments[0] === 'string' && (
+            arguments[0].indexOf('Cannot record touch end without a touch start') !== -1 ||
+            arguments[0].indexOf('Cannot record touch move without a touch start') !== -1
+          )) {
+            return;
+          }
+          return origError.apply(console, arguments);
+        };
+      })();
+    </script>`;
+
+    content = content.replace('</head>', `${filterScript}\n  </head>`);
+  }
+
   fs.writeFileSync(htmlPath, content, 'utf8');
-  console.log('[HTML] Patched dist/index.html: ensured mobile-web-app-capable and removed deprecated apple tags');
+  console.log('[HTML] Patched dist/index.html: ensured mobile-web-app-capable, silenced expo-av deprecation and responder touch errors');
 }
