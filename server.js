@@ -173,8 +173,8 @@ async function downloadViaLoader(videoId) {
     if (!matchId) return null;
     const streamId = matchId[1].replace('card-', '').replace('_progress', '');
 
-    // Poll progress up to 15 times (~25 seconds)
-    for (let i = 0; i < 15; i++) {
+    // Poll progress up to 20 times (~30 seconds)
+    for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1500));
       const progRes = await fetch(`https://loader.to/ajax/progress.php?id=${streamId}`, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -189,22 +189,17 @@ async function downloadViaLoader(videoId) {
             signal: AbortSignal.timeout(60000)
           });
           if (streamRes.ok) {
-            const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
-            const tempFile = `${targetFile}.tmp-${Date.now()}`;
-            const fileStream = fs.createWriteStream(tempFile);
-            const reader = streamRes.body.getReader();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              fileStream.write(Buffer.from(value));
-            }
-            await new Promise(r => fileStream.end(r));
-            if (fs.existsSync(tempFile) && fs.statSync(tempFile).size > 10000) {
+            const arrayBuf = await streamRes.arrayBuffer();
+            const buf = Buffer.from(arrayBuf);
+            if (buf.length > 10000) {
+              const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
+              const tempFile = `${targetFile}.tmp-${Date.now()}`;
+              fs.writeFileSync(tempFile, buf);
               if (fs.existsSync(targetFile)) {
                 try { fs.unlinkSync(targetFile); } catch (_) {}
               }
               fs.renameSync(tempFile, targetFile);
-              console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(fs.statSync(targetFile).size / 1024 / 1024).toFixed(2)} MB)`);
+              console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
               return targetFile;
             }
           }
@@ -230,6 +225,16 @@ async function downloadAudioToCache(videoId) {
   }
 
   const downloadPromise = (async () => {
+    // 1. Prioritize Cloud MP3 resolver (bypasses YouTube datacenter bot detection)
+    try {
+      const cloudFile = await downloadViaLoader(videoId);
+      if (cloudFile && fs.existsSync(cloudFile) && fs.statSync(cloudFile).size > 10000) {
+        return cloudFile;
+      }
+    } catch (e) {
+      console.warn(`[AudioCache] Cloud resolver pre-check failed for ${videoId}:`, e.message);
+    }
+
     const bin = await getYtDlp();
     if (!bin) throw new Error('Audio engine is initializing, please retry shortly.');
 
@@ -315,7 +320,7 @@ async function downloadAudioToCache(videoId) {
 
       try {
         console.log(`[AudioCache] Attempting download for ${videoId} using strategy "${strat.name}"...`);
-        await runProcess(bin, [...strat.args, strat.url], 25000);
+        await runProcess(bin, [...strat.args, strat.url], 12000);
         const checkFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
         if (checkFiles.length > 0) {
           console.log(`[AudioCache] Strategy "${strat.name}" succeeded for ${videoId}!`);
