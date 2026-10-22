@@ -50,6 +50,11 @@ try {
 } catch (_) {}
 
 const CACHE_DIR = path.join(__dirname, 'audio_cache');
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+if (process.env.YOUTUBE_COOKIES) {
+  try { fs.writeFileSync(COOKIES_FILE, process.env.YOUTUBE_COOKIES, 'utf8'); } catch (_) {}
+}
+
 if (!fs.existsSync(CACHE_DIR)) {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -156,6 +161,7 @@ async function downloadAudioToCache(videoId) {
     const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
 
     const baseArgs = [
+      ...(fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : []),
       '--no-check-certificates',
       '--socket-timeout', '15',
       '--no-playlist',
@@ -368,28 +374,6 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
-  }
-
-  // API: Debug diagnostics for Render runtime
-  if (req.url.startsWith('/api/debug')) {
-    const bin = await getYtDlp();
-    const results = {};
-    const clients = ['ios', 'tv', 'tv_embedded', 'mweb', 'android_vr'];
-    for (const c of clients) {
-      try {
-        const t = spawnSync(bin, [
-          '--extractor-args', 'youtube:player_client=' + c,
-          '-f', 'ba/b/18',
-          '--no-playlist',
-          '--simulate',
-          '--print', '%(format_id)s %(acodec)s',
-          'https://www.youtube.com/watch?v=Qu4RQOQaImk'
-        ], { encoding: 'utf8', timeout: 10000 });
-        results[c] = { status: t.status, stdout: t.stdout.trim(), stderr: t.stderr.trim().slice(-200) };
-      } catch (err) { results[c] = { error: err.message }; }
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(results, null, 2));
   }
 
   // API: YouTube Resolver (Node backend, zero CORS issues!)
