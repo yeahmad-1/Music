@@ -186,12 +186,16 @@ async function downloadAudioToCache(videoId) {
     ];
 
     let lastError = null;
+    const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
 
-    // Prioritize clients that bypass YouTube's datacenter BotGuard ('visionos' & 'web_embedded')
-    const candidateClients = ['visionos', 'web_embedded', 'tv', 'android'];
+    // When cookies are present, default client works authenticated. Otherwise prioritize visionos/embed.
+    const candidateClients = hasCookies
+      ? ['default', 'visionos', 'web_embedded', 'tv', 'android']
+      : ['visionos', 'web_embedded', 'tv', 'android'];
+
     const candidateUrls = [
-      `https://www.youtube.com/embed/${videoId}`,
       `https://www.youtube.com/watch?v=${videoId}`,
+      `https://www.youtube.com/embed/${videoId}`,
     ];
 
     for (const client of candidateClients) {
@@ -204,7 +208,7 @@ async function downloadAudioToCache(videoId) {
 
         const clientArgs = [
           ...baseArgs,
-          '--extractor-args', `youtube:player_client=${client}`,
+          ...(client !== 'default' ? ['--extractor-args', `youtube:player_client=${client}`] : []),
           ...(ffmpegBinary ? ['--ffmpeg-location', ffmpegBinary, '-x', '--audio-format', 'mp3'] : ['-f', '251/140/ba/b/18']),
           '-o', `${tempPrefix}.%(ext)s`,
           targetUrl,
