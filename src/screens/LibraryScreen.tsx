@@ -64,6 +64,9 @@ const LibraryScreen = ({ navigation }: any) => {
   const [youtubeCustomTitle, setYoutubeCustomTitle] = useState('');
   const [isDownloadingYt, setIsDownloadingYt] = useState(false);
   const [ytDownloadError, setYtDownloadError] = useState<string | null>(null);
+  const [isCookiesModalVisible, setIsCookiesModalVisible] = useState(false);
+  const [cookiesInput, setCookiesInput] = useState('');
+  const [isSavingCookies, setIsSavingCookies] = useState(false);
 
   const currentDisplayList: Song[] = useMemo(() => {
     if (viewingPlaylistId) {
@@ -249,6 +252,31 @@ const LibraryScreen = ({ navigation }: any) => {
       setYtDownloadError(err?.message || 'Download failed.');
     } finally {
       setIsDownloadingYt(false);
+    }
+  };
+
+  const handleSaveCookies = async () => {
+    if (!cookiesInput.trim() || isSavingCookies) return;
+    setIsSavingCookies(true);
+    try {
+      const bases = YoutubeService.getApiBaseUrls();
+      for (const base of bases) {
+        try {
+          const res = await fetch(`${base}/api/cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookies: cookiesInput })
+          });
+          if (res.ok) {
+            setIsCookiesModalVisible(false);
+            setYtDownloadError(null);
+            setCookiesInput('');
+            break;
+          }
+        } catch (_) {}
+      }
+    } finally {
+      setIsSavingCookies(false);
     }
   };
 
@@ -1294,9 +1322,29 @@ const LibraryScreen = ({ navigation }: any) => {
               </View>
             )}
             {ytDownloadError && (
-              <Text variant="bodySmall" style={{ color: '#D32F2F', marginTop: 4 }}>
-                {ytDownloadError}
-              </Text>
+              <View style={{ marginTop: 8, padding: 10, backgroundColor: 'rgba(211, 47, 47, 0.12)', borderRadius: 8 }}>
+                <Text variant="bodySmall" style={{ color: '#D32F2F', fontWeight: 'bold' }}>
+                  {ytDownloadError.includes('bot') || ytDownloadError.includes('cookies')
+                    ? 'YouTube blocked cloud server download (Bot Detection).'
+                    : ytDownloadError}
+                </Text>
+                {(ytDownloadError.includes('bot') || ytDownloadError.includes('cookies')) && (
+                  <View style={{ marginTop: 6 }}>
+                    <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, fontSize: 12, lineHeight: 16 }}>
+                      YouTube requires cookies on cloud IPs. You can paste your browser cookies below, or import audio files directly with "+ Import Audio".
+                    </Text>
+                    <Button
+                      mode="contained-tonal"
+                      compact
+                      onPress={() => setIsCookiesModalVisible(true)}
+                      style={{ marginTop: 8, alignSelf: 'flex-start' }}
+                      icon="cookie"
+                    >
+                      Configure YouTube Cookies
+                    </Button>
+                  </View>
+                )}
+              </View>
             )}
           </Dialog.Content>
           <Dialog.Actions>
@@ -1317,6 +1365,49 @@ const LibraryScreen = ({ navigation }: any) => {
               icon="download"
             >
               Download
+            </Button>
+          </Dialog.Actions>
+        </Dialog>
+
+        {/* YouTube Cookies Modal */}
+        <Dialog
+          visible={isCookiesModalVisible}
+          onDismiss={() => {
+            if (!isSavingCookies) setIsCookiesModalVisible(false);
+          }}
+          style={{ backgroundColor: theme.colors.surface }}
+        >
+          <Dialog.Title style={{ fontWeight: 'bold' }}>Configure YouTube Cookies</Dialog.Title>
+          <Dialog.Content>
+            <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 12 }}>
+              Install the "Get cookies.txt LOCALLY" extension in Chrome/Firefox/Edge, export YouTube cookies, and paste the content here to authorize cloud downloads:
+            </Text>
+            <TextInput
+              label="Paste cookies.txt"
+              placeholder="# Netscape HTTP Cookie File&#10;.youtube.com TRUE / FALSE ..."
+              value={cookiesInput}
+              onChangeText={setCookiesInput}
+              mode="outlined"
+              multiline
+              numberOfLines={4}
+              style={{ maxHeight: 130, fontSize: 11 }}
+              disabled={isSavingCookies}
+            />
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button
+              onPress={() => setIsCookiesModalVisible(false)}
+              disabled={isSavingCookies}
+            >
+              Cancel
+            </Button>
+            <Button
+              onPress={handleSaveCookies}
+              loading={isSavingCookies}
+              disabled={!cookiesInput.trim() || isSavingCookies}
+              mode="contained"
+            >
+              Save Cookies
             </Button>
           </Dialog.Actions>
         </Dialog>

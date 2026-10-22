@@ -427,6 +427,39 @@ const server = http.createServer(async (req, res) => {
     return res.end('OK');
   }
 
+  // API: YouTube Cookies Management
+  if (req.url === '/api/cookies') {
+    if (req.method === 'GET') {
+      const exists = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ hasCookies: exists }));
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.cookies && typeof parsed.cookies === 'string') {
+            fs.writeFileSync(COOKIES_FILE, parsed.cookies.trim(), 'utf8');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ success: true, message: 'Cookies saved successfully!' }));
+          } else {
+            if (fs.existsSync(COOKIES_FILE)) {
+              try { fs.unlinkSync(COOKIES_FILE); } catch (_) {}
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ success: true, message: 'Cookies cleared.' }));
+          }
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+  }
+
   // API: Settings Backup & Persistence
   if (req.url === '/api/settings') {
     const SETTINGS_FILE = path.join(__dirname, '.app_settings.json');
