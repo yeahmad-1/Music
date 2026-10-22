@@ -187,59 +187,37 @@ async function downloadAudioToCache(videoId) {
 
     let lastError = null;
 
-    // Attempt 1: Standard high-quality MP3 conversion via ffmpeg
-    if (ffmpegBinary) {
-      const mp3Args = [
-        ...baseArgs,
-        '--ffmpeg-location', ffmpegBinary,
-        '-x', '--audio-format', 'mp3',
-        '--extractor-args', 'youtube:player_client=android,ios,visionos,web,tv',
-        '-o', `${tempPrefix}.%(ext)s`,
-        ytUrl,
-      ];
-      try {
-        console.log(`[AudioCache] Attempting MP3 extraction with ffmpeg for ${videoId}...`);
-        await runProcess(bin, mp3Args, 60000);
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AudioCache] Attempt 1 (ffmpeg mp3) failed: ${err.message}`);
-      }
-    }
+    // Prioritize clients that bypass YouTube's datacenter BotGuard ('visionos' & 'web_embedded')
+    const candidateClients = ['visionos', 'web_embedded', 'tv', 'android'];
+    const candidateUrls = [
+      `https://www.youtube.com/embed/${videoId}`,
+      `https://www.youtube.com/watch?v=${videoId}`,
+    ];
 
-    // Attempt 2: Direct stream extraction (format 18 / bestaudio) without ffmpeg
-    let existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
-    if (existingFiles.length === 0) {
-      const directArgs = [
-        ...baseArgs,
-        '--extractor-args', 'youtube:player_client=android,tv,web,ios',
-        '-f', 'ba/b/18',
-        '-o', `${tempPrefix}.%(ext)s`,
-        ytUrl,
-      ];
-      try {
-        console.log(`[AudioCache] Attempting direct audio stream download for ${videoId}...`);
-        await runProcess(bin, directArgs, 60000);
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AudioCache] Attempt 2 (direct stream) failed: ${err.message}`);
-      }
-    }
+    for (const client of candidateClients) {
+      let existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+      if (existingFiles.length > 0) break;
 
-    // Attempt 3: General fallback bestaudio
-    existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
-    if (existingFiles.length === 0) {
-      const fallbackArgs = [
-        ...baseArgs,
-        '-f', 'ba/b',
-        '-o', `${tempPrefix}.%(ext)s`,
-        ytUrl,
-      ];
-      try {
-        console.log(`[AudioCache] Attempting fallback bestaudio for ${videoId}...`);
-        await runProcess(bin, fallbackArgs, 60000);
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AudioCache] Attempt 3 (fallback) failed: ${err.message}`);
+      for (const targetUrl of candidateUrls) {
+        existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+        if (existingFiles.length > 0) break;
+
+        const clientArgs = [
+          ...baseArgs,
+          '--extractor-args', `youtube:player_client=${client}`,
+          ...(ffmpegBinary ? ['--ffmpeg-location', ffmpegBinary, '-x', '--audio-format', 'mp3'] : ['-f', '251/140/ba/b/18']),
+          '-o', `${tempPrefix}.%(ext)s`,
+          targetUrl,
+        ];
+
+        try {
+          console.log(`[AudioCache] Attempting download for ${videoId} using client "${client}" on ${targetUrl}...`);
+          await runProcess(bin, clientArgs, 45000);
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn(`[AudioCache] Client "${client}" failed for ${videoId}: ${err.message}`);
+        }
       }
     }
 
