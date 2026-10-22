@@ -260,12 +260,7 @@ async function downloadAudioToCache(videoId) {
       '-o', `${tempPrefix}.%(ext)s`,
     ];
 
-    // Multi-tier extraction strategies:
-    // 1. Mobile multi-client WITH cookies (User's authenticated session with mobile agent)
-    // 2. Authenticated web client with cookies
-    // 3. Mobile multi-client WITHOUT cookies
-    // 4. Dedicated android client without cookies
-    // 5. Web embedded client with embed URL
+    // Streamlined yt-dlp fallback (max 1-2 fast attempts to avoid reverse proxy timeouts)
     const strategies = [
       ...(hasCookies && safeCookiesFile ? [{
         name: 'mobile-with-cookies',
@@ -275,13 +270,6 @@ async function downloadAudioToCache(videoId) {
           '--extractor-args', 'youtube:player_client=visionos,android,mweb',
           '--cookies', safeCookiesFile,
         ],
-      }, {
-        name: 'web-with-cookies',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--cookies', safeCookiesFile,
-        ],
       }] : []),
       {
         name: 'mobile-no-cookies',
@@ -289,24 +277,6 @@ async function downloadAudioToCache(videoId) {
         args: [
           ...commonArgs,
           '--extractor-args', 'youtube:player_client=visionos,android,mweb',
-          '--no-cookies',
-        ],
-      },
-      {
-        name: 'android-standalone',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=android',
-          '--no-cookies',
-        ],
-      },
-      {
-        name: 'web-embedded',
-        url: embedUrl,
-        args: [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=web_embedded',
           '--no-cookies',
         ],
       },
@@ -588,6 +558,33 @@ const server = http.createServer(async (req, res) => {
         }
       });
       return;
+    }
+  }
+
+  // API: Diagnostics for Full Cloud MP3 Resolver execution
+  if (req.url.startsWith('/api/diag-full-loader')) {
+    const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
+    const start = Date.now();
+    try {
+      const resPath = await downloadViaLoader(videoId);
+      const exists = resPath && fs.existsSync(resPath);
+      const size = exists ? fs.statSync(resPath).size : 0;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: true,
+        resPath,
+        exists,
+        size,
+        timeTakenSec: (Date.now() - start) / 1000
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: false,
+        error: err.message,
+        timeTakenSec: (Date.now() - start) / 1000
+      }));
     }
   }
 
