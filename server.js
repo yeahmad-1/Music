@@ -186,8 +186,8 @@ async function downloadViaLoader(videoId) {
       if (!progUrl) continue;
       console.log(`[AudioCache] Polling progress via ${progUrl}`);
 
-      // Fast polling: check every 600ms up to 35 times (~20 seconds max)
-      for (let i = 0; i < 35; i++) {
+      // Fast polling: check every 600ms up to 50 times (~30 seconds max)
+      for (let i = 0; i < 50; i++) {
         await new Promise(r => setTimeout(r, 600));
         const progRes = await fetch(progUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -321,7 +321,7 @@ async function downloadAudioToCache(videoId) {
 
       try {
         console.log(`[AudioCache] Attempting download for ${videoId} using strategy "${strat.name}"...`);
-        await runProcess(bin, [...strat.args, strat.url], 12000);
+        await runProcess(bin, [...strat.args, strat.url], 25000);
         const checkFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
         if (checkFiles.length > 0) {
           console.log(`[AudioCache] Strategy "${strat.name}" succeeded for ${videoId}!`);
@@ -540,30 +540,33 @@ const server = http.createServer(async (req, res) => {
   // API: Diagnostics for Full Cloud MP3 Resolver execution
   if (req.url.startsWith('/api/diag-full-loader')) {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
+    const videoId = reqUrl.searchParams.get('id') || 'xvT1jH8B9AM';
     const start = Date.now();
     const pollLogs = [];
     try {
       const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const initRes = await fetch(`https://p.savenow.to/ajax/download.php?format=mp3&url=${encodeURIComponent(ytUrl)}`, {
+      const initRes = await fetch(`https://loader.to/ajax/download.php?format=mp3&url=${encodeURIComponent(ytUrl)}`, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         signal: AbortSignal.timeout(10000)
       });
       const data = await initRes.json();
-      const html = Buffer.from(data.content, 'base64').toString();
-      const matchId = html.match(/id="([^"]+)"/);
-      const streamId = matchId ? matchId[1].replace('card-', '').replace('_progress', '') : null;
+      const progUrl = data.progress_url;
+      let finalAudioBytes = 0;
 
-      const progUrl = data.progress_url || `https://p.savenow.to/api/progress?id=${streamId}`;
-      for (let i = 0; i < 25; i++) {
-        await new Promise(r => setTimeout(r, 1200));
+      for (let i = 0; i < 35; i++) {
+        await new Promise(r => setTimeout(r, 600));
         const progRes = await fetch(progUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           signal: AbortSignal.timeout(8000)
         });
         const prog = await progRes.json().catch(() => null);
-        pollLogs.push({ i, prog });
+        pollLogs.push({ i, progress: prog?.progress, text: prog?.text, hasUrl: !!prog?.download_url });
         if (prog && (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url) {
+          const audioRes = await fetch(prog.download_url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+          });
+          const ab = await audioRes.arrayBuffer();
+          finalAudioBytes = ab.byteLength;
           break;
         }
       }
@@ -571,7 +574,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         success: true,
-        streamId,
+        finalAudioBytes,
         pollLogs,
         timeTakenSec: (Date.now() - start) / 1000
       }));
