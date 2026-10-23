@@ -200,8 +200,8 @@ async function downloadViaLoader(videoId) {
         const isFinished = (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url;
         if (isFinished) {
           const downloadTargetUrl = prog.download_url;
-          // Reject ad-redirect pages (e.g. savenow.to/ajax/ad/ or html pages)
-          if (downloadTargetUrl.includes('/ajax/ad/')) {
+          // Reject ad-redirect pages (e.g. savenow.to/ajax/ad/ or p.savenow.to html pages)
+          if (downloadTargetUrl.includes('/ajax/ad/') || downloadTargetUrl.includes('//p.savenow.to/')) {
             console.warn(`[AudioCache] Skipping ad redirect URL: ${downloadTargetUrl}`);
             continue;
           }
@@ -256,29 +256,16 @@ async function downloadAudioToCache(videoId) {
   }
 
   const downloadPromise = (async () => {
-    // 1. Prioritize Cloud MP3 resolver (bypasses YouTube datacenter bot detection)
-    try {
-      const cloudFile = await downloadViaLoader(videoId);
-      if (cloudFile && fs.existsSync(cloudFile) && fs.statSync(cloudFile).size > 10000) {
-        return cloudFile;
-      }
-    } catch (e) {
-      console.warn(`[AudioCache] Cloud resolver pre-check failed for ${videoId}:`, e.message);
-    }
-
-    const bin = await getYtDlp();
-    if (!bin) throw new Error('Audio engine is initializing, please retry shortly.');
-
-    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const embedUrl = `https://www.youtube.com/embed/${videoId}`;
-    const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
-
     const hasCookies = fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 10;
     let safeCookiesFile = null;
     if (hasCookies) {
       safeCookiesFile = path.join(CACHE_DIR, 'session_cookies.txt');
       try { fs.copyFileSync(COOKIES_FILE, safeCookiesFile); } catch (_) { safeCookiesFile = COOKIES_FILE; }
     }
+
+    const bin = await getYtDlp();
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const tempPrefix = path.join(CACHE_DIR, `temp_${videoId}_${Date.now()}`);
 
     const commonArgs = [
       '--no-check-certificates',
@@ -291,45 +278,51 @@ async function downloadAudioToCache(videoId) {
       '-o', `${tempPrefix}.%(ext)s`,
     ];
 
-    // Streamlined yt-dlp fallback (max 1-2 fast attempts to avoid reverse proxy timeouts)
-    const strategies = [
-      ...(hasCookies && safeCookiesFile ? [{
-        name: 'mobile-with-cookies',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
-          '--cookies', safeCookiesFile,
-        ],
-      }] : []),
-      {
-        name: 'mobile-no-cookies',
-        url: ytUrl,
-        args: [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=visionos,android,mweb',
-          '--no-cookies',
-        ],
-      },
-    ];
-
-    const strategyErrors = [];
-
-    for (const strat of strategies) {
-      const existingFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
-      if (existingFiles.length > 0) break;
-
+    // 1. If fresh cookies are available, use direct authenticated yt-dlp first (fastest, ~6-11s!)
+    if (hasCookies && safeCookiesFile && bin) {
       try {
-        console.log(`[AudioCache] Attempting download for ${videoId} using strategy "${strat.name}"...`);
-        await runProcess(bin, [...strat.args, strat.url], 25000);
+        console.log(`[AudioCache] Attempting authenticated yt-dlp download for ${videoId}...`);
+        await runProcess(bin, [...commonArgs, '--cookies', safeCookiesFile, ytUrl], 30000);
         const checkFiles = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
         if (checkFiles.length > 0) {
-          console.log(`[AudioCache] Strategy "${strat.name}" succeeded for ${videoId}!`);
-          break;
+          console.log(`[AudioCache] Authenticated yt-dlp succeeded for ${videoId}!`);
         }
       } catch (err) {
-        strategyErrors.push(`[${strat.name}]: ${err.message}`);
-        console.warn(`[AudioCache] Strategy "${strat.name}" failed for ${videoId}: ${err.message}`);
+        console.warn(`[AudioCache] Authenticated yt-dlp failed for ${videoId}:`, err.message);
+      }
+    }
+
+    // Check if authenticated yt-dlp downloaded the file
+    let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+
+    // 2. If no cookies or yt-dlp didn't succeed, try cloud MP3 resolver
+    if (files.length === 0) {
+      try {
+        console.log(`[AudioCache] Attempting cloud MP3 resolver for ${videoId}...`);
+        const cloudFile = await downloadViaLoader(videoId);
+        if (cloudFile && fs.existsSync(cloudFile) && fs.statSync(cloudFile).size > 10000) {
+          return cloudFile;
+        }
+      } catch (e) {
+        console.warn(`[AudioCache] Cloud resolver failed for ${videoId}:`, e.message);
+      }
+    }
+
+    // 3. Last fallback: try unauthenticated mobile client
+    files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
+    const strategyErrors = [];
+
+    if (files.length === 0 && bin) {
+      try {
+        console.log(`[AudioCache] Attempting fallback unauthenticated download for ${videoId}...`);
+        await runProcess(bin, [
+          ...commonArgs,
+          '--extractor-args', 'youtube:player_client=mweb,android,web',
+          '--no-cookies',
+          ytUrl
+        ], 25000);
+      } catch (err) {
+        strategyErrors.push(err.message);
       }
     }
 
