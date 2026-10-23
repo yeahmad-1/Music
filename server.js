@@ -221,27 +221,18 @@ async function downloadViaLoader(videoId) {
 
           const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
           const tempFile = `${targetFile}.tmp-${Date.now()}`;
-          const fileStream = fs.createWriteStream(tempFile);
-          const reader = streamRes.body.getReader();
-          let downloadedBytes = 0;
+          const arrayBuf = await streamRes.arrayBuffer();
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            fileStream.write(Buffer.from(value));
-            downloadedBytes += value.length;
-          }
-          await new Promise(resolve => fileStream.end(resolve));
-
-          if (fs.existsSync(tempFile) && fs.statSync(tempFile).size > 10000) {
+          if (arrayBuf && arrayBuf.byteLength > 10000) {
+            fs.writeFileSync(tempFile, Buffer.from(arrayBuf));
             if (fs.existsSync(targetFile)) {
               try { fs.unlinkSync(targetFile); } catch (_) {}
             }
             fs.renameSync(tempFile, targetFile);
-            console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(downloadedBytes / 1024 / 1024).toFixed(2)} MB)`);
+            console.log(`[AudioCache] Successfully cached MP3 for ${videoId} via cloud resolver (${(arrayBuf.byteLength / 1024 / 1024).toFixed(2)} MB)`);
             return targetFile;
           } else {
-            try { fs.unlinkSync(tempFile); } catch (_) {}
+            try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (_) {}
           }
         }
       }
