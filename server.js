@@ -560,7 +560,7 @@ const server = http.createServer(async (req, res) => {
           signal: AbortSignal.timeout(8000)
         });
         const prog = await progRes.json().catch(() => null);
-        pollLogs.push({ i, progress: prog?.progress, text: prog?.text, hasUrl: !!prog?.download_url });
+        pollLogs.push({ i, progress: prog?.progress, text: prog?.text, hasUrl: !!prog?.download_url, download_url: prog?.download_url });
         if (prog && (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url) {
           const audioRes = await fetch(prog.download_url, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
@@ -706,10 +706,21 @@ const server = http.createServer(async (req, res) => {
         const filePath = await downloadAudioToCache(videoId);
         return serveAudioFile(filePath, req, res);
       } catch (err) {
-        console.error(`[AudioProxy] Failed to fetch/convert audio for ${videoId}:`, err.message);
+        const rawErr = err.message || '';
+        const isBotChallenge =
+          rawErr.includes('not a bot') ||
+          rawErr.includes('Sign in') ||
+          rawErr.includes('timed out') ||
+          rawErr.includes('cookies');
+
+        const cleanMsg = isBotChallenge
+          ? 'YouTube Bot Verification: The cloud server (Render) IP is restricted by YouTube. Please configure cookies in the menu or run the app locally.'
+          : `Audio stream extraction failed: ${rawErr}`;
+
+        console.error(`[AudioProxy] Failed to fetch/convert audio for ${videoId}:`, cleanMsg);
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end(`Audio stream extraction failed: ${err.message}`);
+          res.end(cleanMsg);
         }
         return;
       }

@@ -409,9 +409,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }, 7000);
         } else {
           const rawMsg = result.message || '';
-          const isBot = rawMsg.toLowerCase().includes('bot') || rawMsg.toLowerCase().includes('sign in');
+          const isBot =
+            rawMsg.toLowerCase().includes('bot') ||
+            rawMsg.toLowerCase().includes('sign in') ||
+            rawMsg.toLowerCase().includes('process timed out') ||
+            rawMsg.toLowerCase().includes('cookies');
           const friendlyMsg = isBot
-            ? 'YouTube bot verification required on cloud host. Please configure cookies or run locally.'
+            ? 'YouTube verification required on cloud host (Render). Please tap Cookies to paste fresh cookies, or run the app locally.'
             : (rawMsg || 'Download failed. Please check the URL.');
           setDownloadTasks(prev =>
             prev.map(t =>
@@ -428,9 +432,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       } catch (err: any) {
         const rawMsg = err?.message || '';
-        const isBot = rawMsg.toLowerCase().includes('bot') || rawMsg.toLowerCase().includes('sign in');
+        const isBot =
+          rawMsg.toLowerCase().includes('bot') ||
+          rawMsg.toLowerCase().includes('sign in') ||
+          rawMsg.toLowerCase().includes('process timed out') ||
+          rawMsg.toLowerCase().includes('cookies');
         const friendlyMsg = isBot
-          ? 'YouTube bot verification required on cloud host. Please configure cookies or run locally.'
+          ? 'YouTube verification required on cloud host (Render). Please tap Cookies to paste fresh cookies, or run the app locally.'
           : (rawMsg || 'Download failed.');
         setDownloadTasks(prev =>
           prev.map(t =>
