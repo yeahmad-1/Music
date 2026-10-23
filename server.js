@@ -327,8 +327,6 @@ async function downloadAudioToCache(videoId) {
     }
 
     // Check if any file was downloaded
-    let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
-
     files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
     if (files.length > 0) {
       const generated = path.join(CACHE_DIR, files[0]);
@@ -607,7 +605,7 @@ const server = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const videoId = reqUrl.searchParams.get('id') || 'lcw4TDMBjZA';
     const useCookies = reqUrl.searchParams.get('cookies') === '1';
-    const client = reqUrl.searchParams.get('client') || 'visionos,android';
+    const client = reqUrl.searchParams.get('client');
 
     try {
       const bin = await getYtDlp();
@@ -624,7 +622,7 @@ const server = http.createServer(async (req, res) => {
         '--no-progress',
         '--js-runtimes', `node:${process.execPath}`,
         '--remote-components', 'ejs:github',
-        '--extractor-args', `youtube:player_client=${client}`,
+        ...(client ? ['--extractor-args', `youtube:player_client=${client}`] : []),
         ...(useCookies && hasCookies && safeCookiesFile ? ['--cookies', safeCookiesFile] : ['--no-cookies']),
         '-f', 'ba/b/251/140/18',
         '--get-url',
