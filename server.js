@@ -158,7 +158,8 @@ function serveAudioFile(filePath, req, res) {
 }
 
 async function downloadViaLoader(videoId) {
-  const hosts = ['https://p.savenow.to', 'https://loader.to'];
+  // Use loader.to which directly provides high-speed CDN MP3 streams
+  const hosts = ['https://loader.to'];
   const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   for (const host of hosts) {
@@ -170,20 +171,24 @@ async function downloadViaLoader(videoId) {
       });
       if (!initRes.ok) continue;
       const data = await initRes.json().catch(() => null);
-      if (!data || !data.content) continue;
+      if (!data) continue;
 
-      const html = Buffer.from(data.content, 'base64').toString();
-      const matchId = html.match(/id="([^"]+)"/);
-      if (!matchId) continue;
-      const streamId = matchId[1].replace('card-', '').replace('_progress', '');
-      console.log(`[AudioCache] Cloud streamId for ${videoId}: ${streamId}`);
+      let progUrl = data.progress_url;
+      if (!progUrl && data.content) {
+        const html = Buffer.from(data.content, 'base64').toString();
+        const matchId = html.match(/id="([^"]+)"/);
+        if (matchId) {
+          const streamId = matchId[1].replace('card-', '').replace('_progress', '');
+          progUrl = `${host}/api/progress?id=${streamId}`;
+        }
+      }
 
-      const progUrl = data.progress_url || `${host}/api/progress?id=${streamId}`;
+      if (!progUrl) continue;
       console.log(`[AudioCache] Polling progress via ${progUrl}`);
 
-      // Poll progress up to 30 times (~36 seconds)
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 1200));
+      // Fast polling: check every 600ms up to 35 times (~20 seconds max)
+      for (let i = 0; i < 35; i++) {
+        await new Promise(r => setTimeout(r, 600));
         const progRes = await fetch(progUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           signal: AbortSignal.timeout(8000)
@@ -194,16 +199,25 @@ async function downloadViaLoader(videoId) {
 
         const isFinished = (prog.progress === 1000 || prog.text === 'Finished') && prog.download_url;
         if (isFinished) {
-          let downloadTargetUrl = prog.download_url;
-          if (downloadTargetUrl.startsWith('http://')) {
-            downloadTargetUrl = downloadTargetUrl.replace('http://', 'https://');
+          const downloadTargetUrl = prog.download_url;
+          // Reject ad-redirect pages (e.g. savenow.to/ajax/ad/ or html pages)
+          if (downloadTargetUrl.includes('/ajax/ad/')) {
+            console.warn(`[AudioCache] Skipping ad redirect URL: ${downloadTargetUrl}`);
+            continue;
           }
+
           console.log(`[AudioCache] Cloud resolver generated MP3 URL for ${videoId}: ${downloadTargetUrl}`);
           const streamRes = await fetch(downloadTargetUrl, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            signal: AbortSignal.timeout(60000)
+            signal: AbortSignal.timeout(45000)
           });
           if (!streamRes.ok) continue;
+
+          const contentType = streamRes.headers.get('content-type') || '';
+          if (contentType.includes('text/html')) {
+            console.warn(`[AudioCache] Download URL returned HTML instead of audio: ${contentType}`);
+            continue;
+          }
 
           const targetFile = path.join(CACHE_DIR, `${videoId}.mp3`);
           const tempFile = `${targetFile}.tmp-${Date.now()}`;
@@ -331,62 +345,6 @@ async function downloadAudioToCache(videoId) {
     // Check if any file was downloaded
     let files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
 
-    // Fallback 1: High-Speed Cloud MP3 Resolver (bypasses YouTube datacenter bot detection)
-    if (files.length === 0) {
-      console.log(`[AudioCache] yt-dlp local strategies failed for ${videoId}. Trying cloud MP3 resolver...`);
-      const loaderFile = await downloadViaLoader(videoId);
-      if (loaderFile && fs.existsSync(loaderFile) && fs.statSync(loaderFile).size > 10000) {
-        return loaderFile;
-      }
-    }
-
-    // Fallback 2: Invidious API fallback
-    if (files.length === 0) {
-      console.warn(`[AudioCache] yt-dlp strategies failed for ${videoId}. Trying Invidious API fallback...`);
-      const invidiousPool = [
-        'https://invidious.nerdvpn.de',
-        'https://invidious.f5.si',
-        'https://yt.chocolatemoo53.com',
-        'https://inv.nadeko.net'
-      ];
-      for (const base of invidiousPool) {
-        try {
-          const ctrl = new AbortController();
-          const tid = setTimeout(() => ctrl.abort(), 8000);
-          const apiRes = await fetch(`${base}/api/v1/videos/${videoId}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            signal: ctrl.signal
-          });
-          clearTimeout(tid);
-          if (apiRes.ok) {
-            const data = await apiRes.json();
-            const formats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
-            if (formats.length > 0) {
-              const best = formats.find(f => f.container === 'm4a') || formats[0];
-              const streamRes = await fetch(best.url, {
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-              });
-              if (streamRes.ok) {
-                const targetExt = best.container || 'm4a';
-                const targetFile = path.join(CACHE_DIR, `${videoId}.${targetExt}`);
-                const fileStream = fs.createWriteStream(targetFile);
-                const reader = streamRes.body.getReader();
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  fileStream.write(Buffer.from(value));
-                }
-                await new Promise(r => fileStream.end(r));
-                if (fs.existsSync(targetFile) && fs.statSync(targetFile).size > 10000) {
-                  return targetFile;
-                }
-              }
-            }
-          }
-        } catch (_) {}
-      }
-    }
-
     files = fs.readdirSync(CACHE_DIR).filter(f => f.startsWith(path.basename(tempPrefix)));
     if (files.length > 0) {
       const generated = path.join(CACHE_DIR, files[0]);
@@ -421,10 +379,11 @@ async function downloadAudioToCache(videoId) {
       return targetFile;
     }
 
+    const isBotChallenge = strategyErrors.some(e => e.includes('confirm you’re not a bot') || e.includes('Sign in') || e.includes('bot'));
     throw new Error(
-      strategyErrors.length > 0
-        ? `Audio download failed: ${strategyErrors.join(' | ')}`
-        : 'Audio download failed: YouTube blocked access or video is unavailable. Please verify the link.'
+      isBotChallenge
+        ? 'YouTube bot verification required on cloud host. Please configure cookies or run locally.'
+        : (strategyErrors.length > 0 ? `Audio download failed: ${strategyErrors.join(' | ')}` : 'Audio download failed.')
     );
   })();
 

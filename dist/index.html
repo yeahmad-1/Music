@@ -29,18 +29,31 @@
       (function() {
         var origWarn = console.warn;
         console.warn = function() {
-          if (arguments[0] && typeof arguments[0] === 'string' && arguments[0].indexOf('Expo AV has been deprecated') !== -1) {
-            return;
+          var firstArg = arguments[0];
+          if (firstArg && typeof firstArg === 'string') {
+            if (
+              firstArg.indexOf('Expo AV has been deprecated') !== -1 ||
+              firstArg.indexOf('Consider using the inert attribute') !== -1 ||
+              firstArg.indexOf('aria-hidden section of the WAI-ARIA') !== -1 ||
+              firstArg.indexOf('The play() request was interrupted') !== -1
+            ) {
+              return;
+            }
           }
           return origWarn.apply(console, arguments);
         };
         var origError = console.error;
         console.error = function() {
-          if (arguments[0] && typeof arguments[0] === 'string' && (
-            arguments[0].indexOf('Cannot record touch end without a touch start') !== -1 ||
-            arguments[0].indexOf('Cannot record touch move without a touch start') !== -1
-          )) {
-            return;
+          var firstArg = arguments[0];
+          if (firstArg && typeof firstArg === 'string') {
+            if (
+              firstArg.indexOf('Cannot record touch end without a touch start') !== -1 ||
+              firstArg.indexOf('Cannot record touch move without a touch start') !== -1 ||
+              firstArg.indexOf('The play() request was interrupted') !== -1 ||
+              firstArg.indexOf('AbortError') !== -1
+            ) {
+              return;
+            }
           }
           return origError.apply(console, arguments);
         };
@@ -55,6 +68,6 @@
     </noscript>
     <!-- The root element for your Expo app. -->
     <div id="root"></div>
-  <script src="/_expo/static/js/web/index-dd940e74f72f7825bc9d8d8e5c7b51c2.js" defer></script>
+  <script src="/_expo/static/js/web/index-05be8eecf8cd0c1aa9cf6abb0e84058c.js" defer></script>
 </body>
 </html>

@@ -463,6 +463,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const isHandlingFinishRef = useRef(false);
+  const playRequestIdRef = useRef(0);
 
   const handleSongFinished = () => {
     if (isHandlingFinishRef.current) return;
@@ -524,6 +525,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const playSong = async (song: Song, customQueue?: Song[]) => {
+    const currentRequestId = ++playRequestIdRef.current;
     try {
       isHandlingFinishRef.current = false;
 
@@ -537,7 +539,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // and prevent mobile browser background/lock-screen autoplay restriction!
       if (Platform.OS === 'web') {
         let targetUri = song.uri;
-        if (!targetUri || (targetUri.startsWith('blob:') && !(await webAudioStorage.hasAudio(song.id)))) {
+        if (!targetUri) {
           try {
             const fresh = await webAudioStorage.getAudioUrl(song.id);
             if (fresh) {
@@ -546,6 +548,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           } catch (_) {}
         }
+
+        if (currentRequestId !== playRequestIdRef.current) return;
 
         const videoId = song.sourceUrl
           ? YoutubeService.extractVideoId(song.sourceUrl)
@@ -562,25 +566,38 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         let usedProxyStreamUrl: string | null = null;
         try {
           await webAudioPlayer.loadAndPlay(targetUri, song);
+          if (currentRequestId !== playRequestIdRef.current) return;
           if (targetUri && targetUri.includes('/api/proxy-audio')) {
             usedProxyStreamUrl = targetUri;
           }
         } catch (playErr: any) {
+          if (
+            currentRequestId !== playRequestIdRef.current ||
+            playErr?.name === 'AbortError' ||
+            (playErr?.message && playErr.message.includes('interrupted'))
+          ) {
+            return;
+          }
+
           console.warn('[WebAudioPlayer] Primary playback failed, trying candidate endpoints:', playErr?.message);
           let recovered = false;
           if (videoId) {
             const candidates = YoutubeService.getCandidateProxyUrls(videoId);
             for (const cand of candidates) {
+              if (currentRequestId !== playRequestIdRef.current) return;
               try {
                 await webAudioPlayer.loadAndPlay(cand, song);
+                if (currentRequestId !== playRequestIdRef.current) return;
                 recovered = true;
                 usedProxyStreamUrl = cand;
                 break;
               } catch (_) {}
             }
           }
-          if (!recovered) throw playErr;
+          if (!recovered && currentRequestId === playRequestIdRef.current) throw playErr;
         }
+
+        if (currentRequestId !== playRequestIdRef.current) return;
 
         if (usedProxyStreamUrl) {
           fetch(usedProxyStreamUrl)
@@ -665,7 +682,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSound(newSound);
       setIsPlaying(true);
       isHandlingFinishRef.current = false;
-    } catch (error) {
+    } catch (error: any) {
+      if (
+        error?.name === 'AbortError' ||
+        (error?.message && error.message.includes('interrupted'))
+      ) {
+        return;
+      }
       console.error("Error playing song", error);
     }
   };
@@ -884,6 +907,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
     setCustomPlaylists(updated);
     await saveCustomPlaylists(updated);
+  };
+
+  actionsRef.current = {
+    playSong,
+    pauseSong,
+    resumeSong,
+    nextSong,
+    previousSong,
+    seek,
   };
 
   const audioContextValue = useMemo(() => ({

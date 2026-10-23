@@ -95,9 +95,10 @@ export class WebAudioPlayer {
         if (this.isEndedEmitted) return;
         this.isEndedEmitted = true;
         this.emitStatus(true);
-        this.updateMediaPlaybackState('paused');
-
-        // Immediately notify AudioContext to start next track without delay
+        // CRITICAL FOR LOCK-SCREEN AUTOPLAY:
+        // Do NOT set playbackState to 'paused' here. Setting 'paused' tells the mobile OS
+        // to freeze background tab execution before the next track can start!
+        // Immediately notify AudioContext to start next track synchronously
         if (this.onSongEnded) {
           this.onSongEnded();
         }
@@ -172,6 +173,10 @@ export class WebAudioPlayer {
       }
       this.updateMediaPlaybackState('playing');
     } catch (err: any) {
+      if (err?.name === 'AbortError' || (err?.message && err.message.includes('interrupted'))) {
+        // Safe: user paused or loaded another track before playback finished initializing
+        return;
+      }
       console.warn('[WebAudioPlayer] play() call was rejected or suspended:', err?.message);
       throw err;
     }
@@ -179,18 +184,27 @@ export class WebAudioPlayer {
 
   public async pause(): Promise<void> {
     if (this.audio) {
-      this.audio.pause();
-      this.updateMediaPlaybackState('paused');
+      try {
+        this.audio.pause();
+        this.updateMediaPlaybackState('paused');
+      } catch (_) {}
     }
   }
 
   public async resume(): Promise<void> {
     if (this.audio) {
-      const playPromise = this.audio.play();
-      if (playPromise !== undefined) {
-        await playPromise;
+      try {
+        const playPromise = this.audio.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+        }
+        this.updateMediaPlaybackState('playing');
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || (err?.message && err.message.includes('interrupted'))) {
+          return;
+        }
+        console.warn('[WebAudioPlayer] resume() call was rejected:', err?.message);
       }
-      this.updateMediaPlaybackState('playing');
     }
   }
 

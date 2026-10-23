@@ -28,31 +28,46 @@ if (fs.existsSync(htmlPath)) {
     );
   }
 
-  // Inject console warning/error filter into <head> so deprecated warnings & responder touch errors never pollute DevTools
-  if (!content.includes('filter-console-logs')) {
-    const filterScript = `
+  // Inject console warning/error filter into <head> so deprecated warnings, inert/aria-hidden notes & responder touch errors never pollute DevTools
+  const filterScript = `
     <script id="filter-console-logs">
       (function() {
         var origWarn = console.warn;
         console.warn = function() {
-          if (arguments[0] && typeof arguments[0] === 'string' && arguments[0].indexOf('Expo AV has been deprecated') !== -1) {
-            return;
+          var firstArg = arguments[0];
+          if (firstArg && typeof firstArg === 'string') {
+            if (
+              firstArg.indexOf('Expo AV has been deprecated') !== -1 ||
+              firstArg.indexOf('Consider using the inert attribute') !== -1 ||
+              firstArg.indexOf('aria-hidden section of the WAI-ARIA') !== -1 ||
+              firstArg.indexOf('The play() request was interrupted') !== -1
+            ) {
+              return;
+            }
           }
           return origWarn.apply(console, arguments);
         };
         var origError = console.error;
         console.error = function() {
-          if (arguments[0] && typeof arguments[0] === 'string' && (
-            arguments[0].indexOf('Cannot record touch end without a touch start') !== -1 ||
-            arguments[0].indexOf('Cannot record touch move without a touch start') !== -1
-          )) {
-            return;
+          var firstArg = arguments[0];
+          if (firstArg && typeof firstArg === 'string') {
+            if (
+              firstArg.indexOf('Cannot record touch end without a touch start') !== -1 ||
+              firstArg.indexOf('Cannot record touch move without a touch start') !== -1 ||
+              firstArg.indexOf('The play() request was interrupted') !== -1 ||
+              firstArg.indexOf('AbortError') !== -1
+            ) {
+              return;
+            }
           }
           return origError.apply(console, arguments);
         };
       })();
     </script>`;
 
+  if (content.includes('id="filter-console-logs"')) {
+    content = content.replace(/<script id="filter-console-logs">[\s\S]*?<\/script>/, filterScript.trim());
+  } else {
     content = content.replace('</head>', `${filterScript}\n  </head>`);
   }
 
